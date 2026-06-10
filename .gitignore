@@ -1,0 +1,16 @@
+# Cache directories
+cache_momentum/
+__pycache__/
+*.pyc
+
+# Output files
+backtest_trades_*.csv
+backtest_equity_*.csv
+
+# Environment
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
