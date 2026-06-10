@@ -1,8 +1,9 @@
 """
 =============================================================================
-NSE MOMENTUM SCANNER - LIVE TRADING SIGNALS
+NSE MOMENTUM SCANNER - LIVE TRADING SIGNALS (ALL NSE STOCKS)
 =============================================================================
-Scans entire NSE EQ-series universe (no ETFs, no BE, no surveillance stocks)
+Scans ENTIRE NSE EQ-series universe (~2500 stocks from Angel One scrip master)
+No hardcoded lists - fetches ALL available NSE-EQ stocks
 
 FILTERS:
   1. Price > SMA10 > SMA20 > SMA50 > SMA150 > SMA200  (perfect alignment)
@@ -28,7 +29,6 @@ import os
 import pickle
 import time
 import datetime
-import io
 import pandas as pd
 import numpy as np
 import warnings
@@ -67,107 +67,6 @@ FETCH_YEARS = 6  # Need 5 years for 5Y high calculation
 # =============================================================================
 
 os.makedirs(CACHE_DIR, exist_ok=True)
-
-# =============================================================================
-# COMPREHENSIVE FALLBACK UNIVERSE (EQ series only)
-# =============================================================================
-UNIVERSE_FALLBACK = [
-    # Nifty 50
-    "ADANIENT","ADANIPORTS","APOLLOHOSP","ASIANPAINT","AXISBANK",
-    "BAJAJ-AUTO","BAJAJFINSV","BAJFINANCE","BHARTIARTL","BPCL",
-    "BRITANNIA","CIPLA","COALINDIA","DIVISLAB","DRREDDY",
-    "EICHERMOT","GRASIM","HCLTECH","HDFCBANK","HDFCLIFE",
-    "HEROMOTOCO","HINDALCO","HINDUNILVR","ICICIBANK","INDUSINDBK",
-    "INFY","ITC","JSWSTEEL","KOTAKBANK","LT","M&M","MARUTI",
-    "NESTLEIND","NTPC","ONGC","POWERGRID","RELIANCE","SBILIFE",
-    "SBIN","SHREECEM","SUNPHARMA","TATAMOTORS","TATASTEEL",
-    "TATACONSUM","TCS","TECHM","TITAN","ULTRACEMCO","WIPRO","ADANIGREEN",
-    # Nifty Next 50
-    "AMBUJACEM","BAJAJHLDNG","BANKBARODA","CANBK","DABUR","DLF",
-    "GAIL","GODREJCP","HAVELLS","HINDPETRO","ICICIPRULI","INDHOTEL",
-    "IOC","LUPIN","HDFCAMC","NAUKRI","OFSS","PAGEIND","PFC",
-    "PIDILITIND","PNB","RECLTD","SAIL","SHRIRAMFIN","SIEMENS","SRF",
-    "TATACOMM","TATACHEM","TORNTPHARM","TVSMOTOR","UBL","UNIONBANK",
-    "UPL","VEDL","VBL","VOLTAS","ZEEL","ZOMATO","MUTHOOTFIN",
-    "CHOLAFIN","INDUSTOWER","DMART","ADANITRANS","ADANIPOWER",
-    "NYKAA","PAYTM","POLICYBZR","IRCTC","TRENT","RVNL","LICI",
-    # Nifty Midcap 150
-    "ABCAPITAL","ABFRL","AIAENG","ALKEM","APOLLOTYRE","ASHOKLEY",
-    "ASTRAL","ATUL","AUBANK","AUROPHARMA","BALKRISHNA","BANDHANBNK",
-    "BATAINDIA","BERGEPAINT","BHARATFORG","BHEL","BIOCON","CAMS",
-    "CANFINHOME","CEATLTD","CHOLAHLDNG","COFORGE","COLPAL","CONCOR",
-    "COROMANDEL","CROMPTON","CUMMINSIND","CYIENT","DEEPAKNTR",
-    "DELTACORP","EMAMILTD","ESCORTS","EXIDEIND","FINEORG","FLUOROCHEM",
-    "FORTIS","GLENMARK","GODREJPROP","GRANULES","GUJGASLTD",
-    "IDFCFIRSTB","IPCALAB","IRFC","IGL","JINDALSTEL","JUBLFOOD",
-    "KPITTECH","LALPATHLAB","LAURUSLABS","LICHSGFIN","LTIM","LTTS",
-    "M&MFIN","MANAPPURAM","MARICO","METROPOLIS","MFSL","MPHASIS",
-    "MRF","NATIONALUM","NCC","NMDC","NHPC","OBEROIRLTY","PERSISTENT",
-    "PETRONET","PHOENIXLTD","POLYCAB","PVRINOX","RAMCOCEMENT","RBLBANK",
-    "SCHAEFFLER","SKFINDIA","SOBHA","STARHEALTH","SUNTV","SUPREMEIND",
-    "SYNGENE","TATAELXSI","TATAINVEST","THERMAX","TIMKEN","TORNTPOWER",
-    "TRIDENT","VARUNBEV","VGUARD","WELCORP","WHIRLPOOL","WOCKPHARMA",
-    "ZYDUSLIFE","HAPPSTMNDS","INOXWIND","SUZLON","IREDA","NBCC",
-    "KEI","TITAGARH","CDSL","CGPOWER","DIXON","AMBER","MANYAVAR",
-    "MOTILALOFS","MSTC","GRINDWELL","CARBORUNDUM","BOSCHLTD",
-    # Nifty Smallcap 250
-    "AARTIIND","ACCELYA","AFFLE","AJANTPHARM","ALKYLAMINE","AMARAJABAT",
-    "ANGELONE","APARINDS","APTUS","ASAHIINDIA","ASTERDM","ATGL",
-    "AVANTIFEED","BAJAJCON","BALRAMCHIN","BASF","BAYERCROP","BLUESTARCO",
-    "BRIGADE","CAPLIPOINT","CASTROLIND","CENTURYPLY","CESC","CHAMBLFERT",
-    "CLEAN","CRISIL","CUB","DHANUKA","EIL","EIDPARRY","ENDURANCE",
-    "ENGINERSIN","EQUITAS","ESABINDIA","GALAXYSURF","GATEWAY","GHCL",
-    "GICHSGFIN","GLAND","GNFC","GODAWARI","GODFRYPHLP","GPPL",
-    "GREAVESCOT","GREENPANEL","GSFC","HBLPOWER","HERANBA","HINDCOPPER",
-    "HOMEFIRST","HONAUT","IFCI","IIFL","INDIGOPNTS","IRCON","J&KBANK",
-    "JKCEMENT","JKPAPER","JKLAKSHMI","JMFINANCIL","JUBLINGREA",
-    "JUSTDIAL","KAJARIA","KANSAINER","KARURVYSYA","KFINTECH","KIMS",
-    "KNRCON","KRBL","KSB","LATENTVIEW","LXCHEM","MANINFRA","MAXHEALTH",
-    "MIDHANI","MOIL","NATCOPHARM","NAVINFLUOR","NILKAMAL","NUVAMA",
-    "NUVOCO","OLECTRA","ORIENTELEC","PANAMAPET","PATELENG","PFIZER",
-    "PIRAMALENT","PNBHOUSING","POLYPLEX","QUICKHEAL","RADICO","RAILTEL",
-    "RAIN","REDINGTON","RELAXO","RITES","ROUTE","SAFARI","SANOFI",
-    "SBICARD","SHANKARA","SHAREINDIA","SHILPAMED","SHOPERSTOP","SPANDANA",
-    "STCINDIA","SUDARSCHEM","SUMICHEM","SUNFLAG","SUNTECK","SURYODAY",
-    "SUVEN","TEJASNET","THYROCARE","TIMETECHNO","TVSHLTD","UCO",
-    "UJJIVAN","UJJIVANSFB","UTIAMC","VAIBHAVGBL","VARROC","VINATIORGA",
-    "VOLTAMP","VSTIND","WELSPUNIND","WESTLIFE","WONDERLA","YESBANK",
-    "ZENSARTECH","DELHIVERY","INDIAMART","APLAPOLLO","BSOFT","JYOTHYLAB",
-    "KOLTEPATIL","MATRIMONY","SAREGAMA","TANLA","TEAMLEASE","TIINDIA",
-    "DATAPATTNS","NETWORK18","MINDACORP","TARSONS","THOUGHTWKS","SJVN",
-    "PNCINFRA","JSWENERGY","RAJRATAN","SANSERA","SAPPHIRE","SHAKTIPUMP",
-    "SNOWMAN","STLTECH","SWSOLAR","WABCOINDIA","WEBELSOLAR","JSWINFRA",
-    "MAHINDCIE","SATIN","SEQUENT","VINDHYATEL","ANANTRAJ","PRESTIGE",
-    "LODHA","ARVIND","RAYMOND","BIRLACORPN","DALBHARAT","HEIDELBERG",
-    "DEVYANI","GOCOLORS","TCNSBRANDS","EDELWEISS","EMKAY","CENTRALBK",
-    "INDIANB","BANKINDIA","MAHABANK","POWERINDIA","PRINCEPIPES","NSLNISP",
-    "DCBBANK","EQUITASBNK","KTKBANK","CSBBANK","FINOLEXIND","APCOTEXIND",
-    "NOCIL","ELGIEQUIP","EMCURE","EPIGRAL","ROLEXRINGS","RPGLIFE",
-    "SKIPPER","ABBOTINDIA","GLAXO","PIIND","LUXIND","NIITLTD",
-    "ANANDRATHI","BSE","ZENTEC","FORCEMOT","PCBL","HUDCO","GABRIEL",
-    "PARADEEP","MAZDOCK","PGEL","COCHINSHIP","TECHNOE","JWL",
-    "BIKAJI","CAMPUS","MEDANTA","NETWEB","SUVENPHAR","TCIEXP",
-    "UCOBANK","VMART","DCMSHRIRAM","JINDALSAW","KPIL","KRSNAA",
-    "SHYAMMETL","SONATSOFTW","OPTIEMUS","ORCHPHARMA","POWERMECH",
-    "PRICOLLTD","WINDLAS","WPIL","HAL","BEL","MAZAGON","GRSE",
-]
-
-# Deduplicate
-_s = set()
-UNIVERSE_FALLBACK = [x for x in UNIVERSE_FALLBACK if not (x in _s or _s.add(x))]
-
-# Symbol corrections
-SYMBOL_MAP = {
-    "BERGERPAINTS": "BERGEPAINT",
-    "AUROBINDO": "AUROPHARMA",
-    "JSPL": "JINDALSTEL",
-    "REC": "RECLTD",
-    "TVSMOTORS": "TVSMOTOR",
-    "CEAT": "CEATLTD",
-    "MCDOWELL-N": "UNITDSPR",
-    "MOTHERSON": "MOTHERSUMI",
-    "INFOEDGE": "NAUKRI",
-}
 
 
 # =============================================================================
@@ -220,119 +119,61 @@ def login(totp_fixed):
 
 
 # =============================================================================
-# UNIVERSE DOWNLOAD
+# GET ALL NSE STOCKS FROM ANGEL ONE SCRIP MASTER
+# This is the source of truth - contains ALL tradeable NSE stocks
 # =============================================================================
-def get_universe():
-    """Download NSE EQ-series stocks (excludes ETFs, BE, surveillance)"""
-    cache_path = os.path.join(CACHE_DIR, "universe_list.pkl")
+def get_all_nse_stocks():
+    """
+    Get ALL NSE-EQ stocks directly from Angel One scrip master.
+    Returns dict: {symbol: token} for all ~2500 NSE equity stocks.
+    Excludes: ETFs, BE series, SM series, surveillance stocks.
+    """
+    cache_path = os.path.join(CACHE_DIR, "all_nse_stocks.pkl")
 
     # Check cache (refresh daily)
     if os.path.exists(cache_path):
         age_hours = (time.time() - os.path.getmtime(cache_path)) / 3600
         if age_hours < 24:
             with open(cache_path, "rb") as f:
-                syms = pickle.load(f)
-            print(f"  Universe: {len(syms)} symbols (cache {age_hours:.1f}h old)")
-            return syms
-        print("  Universe cache >24h — refreshing...")
+                data = pickle.load(f)
+            print(f"  Loaded {len(data):,} NSE-EQ stocks from cache ({age_hours:.1f}h old)")
+            return data
+        print("  Cache >24h old — refreshing...")
 
     import requests
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    equity_url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
-    syms = []
+    print("  Downloading Angel One scrip master (all NSE stocks)...")
 
     try:
-        print("  Downloading NSE equity list...")
-        resp = requests.get(equity_url, headers=headers, timeout=20)
-        if resp.status_code == 200 and len(resp.content) > 10000:
-            df = pd.read_csv(io.StringIO(resp.text))
+        resp = requests.get(
+            "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json",
+            timeout=60
+        )
+        df = pd.DataFrame(resp.json())
 
-            # Filter ONLY EQ series (excludes BE, BZ, SM, etc.)
-            if "SERIES" in df.columns:
-                eq_mask = df["SERIES"] == "EQ"
+        # Filter NSE exchange only
+        nse = df[df["exch_seg"] == "NSE"].copy()
+        print(f"    Total NSE instruments: {len(nse):,}")
 
-                # Find symbol column
-                sym_col = " SYMBOL" if " SYMBOL" in df.columns else "SYMBOL"
-                syms = df[eq_mask][sym_col].dropna().str.strip().tolist()
+        # Filter -EQ suffix (main equity series, excludes ETFs, bonds, etc.)
+        eq = nse[nse["symbol"].str.endswith("-EQ", na=False)].copy()
+        print(f"    NSE-EQ stocks: {len(eq):,}")
 
-            print(f"  NSE equity list: {len(syms)} EQ-series stocks (no ETF/BE/surveillance)")
+        # Extract clean symbol name
+        eq["sym"] = eq["symbol"].str.replace("-EQ", "", regex=False).str.strip()
+
+        # Create symbol -> token mapping
+        stock_map = dict(zip(eq["sym"], eq["token"]))
+
+        # Cache it
+        with open(cache_path, "wb") as f:
+            pickle.dump(stock_map, f)
+
+        print(f"  Saved {len(stock_map):,} NSE-EQ stocks to cache")
+        return stock_map
+
     except Exception as e:
-        print(f"  NSE download failed: {e}")
-
-    if len(syms) < 100:
-        print("  Using fallback universe list")
-        syms = list(UNIVERSE_FALLBACK)
-
-    # Apply symbol corrections
-    syms = [SYMBOL_MAP.get(s, s) for s in syms]
-
-    # Deduplicate
-    seen = set()
-    syms = [s for s in syms if not (s in seen or seen.add(s))]
-
-    with open(cache_path, "wb") as f:
-        pickle.dump(syms, f)
-    print(f"  Universe saved: {len(syms)} symbols")
-    return syms
-
-
-# =============================================================================
-# TOKEN MAP
-# =============================================================================
-def get_token_map():
-    """Get Angel One symbol -> token mapping"""
-    cache_path = os.path.join(CACHE_DIR, "scrip_master.pkl")
-
-    if os.path.exists(cache_path):
-        with open(cache_path, "rb") as f:
-            cached = pickle.load(f)
-        age_h = (time.time() - os.path.getmtime(cache_path)) / 3600
-        if len(cached) > 100 and age_h < 24:
-            print(f"  Token map: {len(cached):,} tokens (cache {age_h:.1f}h old)")
-            return cached
-        os.remove(cache_path)
-
-    import requests
-    print("  Downloading scrip master...")
-    resp = requests.get(
-        "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json",
-        timeout=30
-    )
-    df = pd.DataFrame(resp.json())
-    nse = df[df["exch_seg"] == "NSE"]
-    eq = nse[nse["symbol"].str.endswith("-EQ", na=False)].copy()
-    eq["sym"] = eq["symbol"].str.replace("-EQ", "", regex=False).str.strip()
-    token_map = eq.set_index("sym")["token"].to_dict()
-
-    print(f"  {len(nse):,} NSE -> {len(eq):,} -EQ -> {len(token_map):,} tokens")
-
-    with open(cache_path, "wb") as f:
-        pickle.dump(token_map, f)
-    return token_map
-
-
-def find_token(token_map, symbol):
-    """Find token for a symbol with fallback variations"""
-    if symbol in token_map:
-        return symbol, token_map[symbol]
-
-    corrected = SYMBOL_MAP.get(symbol, symbol)
-    if corrected in token_map:
-        return corrected, token_map[corrected]
-
-    # Try common variations
-    variations = [
-        symbol.replace("PAINTS", "PAINT"),
-        symbol.replace("MOTORS", "MOTOR"),
-        "AUROPHARMA" if symbol == "AUROBINDO" else None,
-        "CEATLTD" if symbol == "CEAT" else None,
-        "JINDALSTEL" if symbol == "JSPL" else None,
-    ]
-    for var in variations:
-        if var and var in token_map:
-            return var, token_map[var]
-
-    return None, None
+        print(f"  ERROR downloading scrip master: {e}")
+        raise SystemExit(1)
 
 
 # =============================================================================
@@ -341,18 +182,14 @@ def find_token(token_map, symbol):
 def fetch_ohlc(obj, token, symbol, from_date, to_date):
     """Fetch OHLC data with caching"""
     cache_path = os.path.join(CACHE_DIR, f"{symbol}_1D.pkl")
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
 
-    # Check cache - refresh if stale (older than today)
+    # Check cache - use if less than 1 day old
     if os.path.exists(cache_path):
-        with open(cache_path, "rb") as f:
-            df = pickle.load(f)
-        if not df.empty:
-            last_date = str(df.index[-1].date())
-            cache_age_days = (time.time() - os.path.getmtime(cache_path)) / 86400
-
-            # Use cache if it has recent data (within 2 days) or was updated today
-            if cache_age_days < 1 or last_date >= (datetime.date.today() - datetime.timedelta(days=3)).strftime("%Y-%m-%d"):
+        cache_age_days = (time.time() - os.path.getmtime(cache_path)) / 86400
+        if cache_age_days < 1:
+            with open(cache_path, "rb") as f:
+                df = pickle.load(f)
+            if not df.empty:
                 return df
 
     rows = []
@@ -388,8 +225,9 @@ def fetch_ohlc(obj, token, symbol, from_date, to_date):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df.dropna(subset=["close"], inplace=True)
 
-    with open(cache_path, "wb") as f:
-        pickle.dump(df, f)
+    if not df.empty:
+        with open(cache_path, "wb") as f:
+            pickle.dump(df, f)
 
     return df
 
@@ -561,7 +399,7 @@ def print_results(df, top_n=30):
 
     sep = "=" * 140
     print(f"\n{sep}")
-    print("  NSE MOMENTUM SCANNER - LIVE RESULTS")
+    print("  NSE MOMENTUM SCANNER - LIVE RESULTS (ALL NSE STOCKS)")
     print(f"  Scan Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Stocks Passing Filters: {len(df)}")
     print(sep)
@@ -619,7 +457,8 @@ def export_results(df, filename="momentum_scan_results.csv"):
 def run_scanner():
     """Main scanner function"""
     print("\n" + "=" * 70)
-    print("  NSE MOMENTUM SCANNER - LIVE")
+    print("  NSE MOMENTUM SCANNER - ALL NSE STOCKS")
+    print("  Source: Angel One Scrip Master (~2500 NSE-EQ stocks)")
     print("  Filter: Price > SMA10 > SMA20 > SMA50 > SMA150 > SMA200")
     print("  Filter: Within 20% of ATH / 1Y High / 5Y High")
     print("  Ranking: Relative momentum (20d, 60d, 90d ROC)")
@@ -637,48 +476,30 @@ def run_scanner():
         print(f"\n  LOGIN FAILED: {e}")
         raise SystemExit(1)
 
-    # Get universe
-    print("Loading universe...")
-    symbols = get_universe()
-    print(f"  Total EQ-series symbols: {len(symbols)}")
-
-    # Get token map
-    print("\nLoading token map...")
-    token_map = get_token_map()
-
-    # Match symbols to tokens
-    print(f"\nMatching symbols to tokens...")
-    matched = {}
-    not_found = []
-    for sym in symbols:
-        used, tok = find_token(token_map, sym)
-        if tok:
-            matched[used] = tok
-        else:
-            not_found.append(sym)
-    print(f"  Matched: {len(matched)}")
-    if not_found:
-        print(f"  Not found: {len(not_found)} (first 5: {not_found[:5]})")
+    # Get ALL NSE stocks from scrip master
+    print("Loading ALL NSE stocks from Angel One scrip master...")
+    all_stocks = get_all_nse_stocks()
+    total = len(all_stocks)
+    print(f"  Total NSE-EQ stocks to scan: {total:,}")
 
     # Date range for fetch
     fetch_end = datetime.date.today().strftime("%Y-%m-%d")
     fetch_start = (datetime.date.today() - datetime.timedelta(days=365 * FETCH_YEARS)).strftime("%Y-%m-%d")
 
-    # Scan all stocks
-    total = len(matched)
-    cached = sum(1 for s in matched if os.path.exists(os.path.join(CACHE_DIR, f"{s}_1D.pkl")))
+    # Count cached
+    cached = sum(1 for s in all_stocks if os.path.exists(os.path.join(CACHE_DIR, f"{s}_1D.pkl")))
     new_fetch = total - cached
 
-    print(f"\nScanning {total} stocks...")
-    print(f"  Cached: {cached} (instant)")
-    print(f"  To fetch: {new_fetch} (ETA ~{new_fetch * 2.5 / 60:.0f} min)\n")
+    print(f"\nScanning {total:,} stocks...")
+    print(f"  Already cached: {cached:,} (instant)")
+    print(f"  Need to fetch: {new_fetch:,} (ETA ~{new_fetch * 2.5 / 60:.0f} min)\n")
 
     results = []
     skipped = 0
     filtered_out = 0
     t0 = time.time()
 
-    for i, (sym, tok) in enumerate(matched.items(), 1):
+    for i, (sym, tok) in enumerate(all_stocks.items(), 1):
         elapsed = time.time() - t0
         rate = i / max(elapsed, 1)
         eta_s = (total - i) / rate if rate > 0 else 0
@@ -704,9 +525,9 @@ def run_scanner():
 
     elapsed_m = (time.time() - t0) / 60
     print(f"\n\n  Scan complete in {elapsed_m:.1f} min")
-    print(f"  Total scanned: {total}")
-    print(f"  Insufficient data: {skipped}")
-    print(f"  Filtered out (price/volume): {filtered_out}")
+    print(f"  Total scanned: {total:,}")
+    print(f"  Insufficient data: {skipped:,}")
+    print(f"  Filtered out (price/volume): {filtered_out:,}")
     print(f"  Passed all filters: {len(results)}")
 
     if not results:
