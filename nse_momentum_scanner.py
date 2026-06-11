@@ -179,8 +179,8 @@ def get_all_nse_stocks():
 # =============================================================================
 # OHLC DATA FETCH
 # =============================================================================
-def fetch_ohlc(obj, token, symbol, from_date, to_date):
-    """Fetch OHLC data with caching"""
+def fetch_ohlc(obj, token, symbol, from_date, to_date, max_retries=3):
+    """Fetch OHLC data with caching and retry logic"""
     cache_path = os.path.join(CACHE_DIR, f"{symbol}_1D.pkl")
 
     # Check cache - use if less than 1 day old
@@ -198,20 +198,27 @@ def fetch_ohlc(obj, token, symbol, from_date, to_date):
 
     while cur <= end:
         nxt = min(cur + pd.DateOffset(days=400), end)
-        try:
-            r = obj.getCandleData({
-                "exchange": "NSE",
-                "symboltoken": token,
-                "interval": "ONE_DAY",
-                "fromdate": cur.strftime("%Y-%m-%d %H:%M"),
-                "todate": nxt.strftime("%Y-%m-%d %H:%M"),
-            })
-            if r.get("status") and r.get("data"):
-                rows.extend(r["data"])
-        except Exception:
-            pass
+
+        # Retry logic for network errors
+        for attempt in range(max_retries):
+            try:
+                r = obj.getCandleData({
+                    "exchange": "NSE",
+                    "symboltoken": token,
+                    "interval": "ONE_DAY",
+                    "fromdate": cur.strftime("%Y-%m-%d %H:%M"),
+                    "todate": nxt.strftime("%Y-%m-%d %H:%M"),
+                })
+                if r.get("status") and r.get("data"):
+                    rows.extend(r["data"])
+                break  # Success, exit retry loop
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                # On final attempt, just continue to next chunk
+
         cur = nxt + pd.DateOffset(days=1)
-        time.sleep(0.35)
+        time.sleep(0.4)  # Slightly longer delay to avoid rate limiting
 
     if not rows:
         return pd.DataFrame()
