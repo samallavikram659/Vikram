@@ -120,6 +120,30 @@ def login(totp_fixed):
 
 
 # =============================================================================
+# EXCLUSION PATTERNS FOR ETFs, LIQUID FUNDS, BONDS, etc.
+# =============================================================================
+ETF_LIQUID_PATTERNS = [
+    "ETF", "BEES", "LIQUID", "GOLD", "SILVER", "NIFTY", "BANK", "GILT",
+    "GSEC", "BOND", "CPSE", "PSU", "INFRA", "NEXT50", "MIDCAP", "SMALLCAP",
+    "CONSUMPTION", "DIVIDEND", "GROWTH", "VALUE", "MOMENTUM", "QUALITY",
+    "LOWVOL", "ALPHA", "EQUAL", "SHARIAH", "ESG", "HEALTHCARE", "IT",
+    "PRIVATE", "SETF", "NETF", "IETF", "CASE", "ADD", "PLUS", "SHRI",
+    # Specific ETF/Liquid fund names
+    "LIQUIDBETF", "LIQUIDCASE", "LIQUIDPLUS", "CASHIETF", "LIQUIDADD",
+    "HDFCLIQUID", "LIQUIDSHRI", "GROWWLIQID", "LIQUID1", "AONELIQUID",
+    "EBBETF", "GILT5YBEES", "GSEC10YEAR", "GSEC5IETF",
+]
+
+def is_etf_or_liquid(symbol):
+    """Check if symbol is an ETF, liquid fund, or index fund"""
+    sym_upper = symbol.upper()
+    for pattern in ETF_LIQUID_PATTERNS:
+        if pattern in sym_upper:
+            return True
+    return False
+
+
+# =============================================================================
 # GET ALL NSE STOCKS FROM ANGEL ONE SCRIP MASTER
 # This is the source of truth - contains ALL tradeable NSE stocks
 # =============================================================================
@@ -127,7 +151,7 @@ def get_all_nse_stocks():
     """
     Get ALL NSE-EQ stocks directly from Angel One scrip master.
     Returns dict: {symbol: token} for all ~2500 NSE equity stocks.
-    Excludes: ETFs, BE series, SM series, surveillance stocks.
+    Excludes: ETFs, BE series, SM series, surveillance stocks, liquid funds.
     """
     cache_path = os.path.join(CACHE_DIR, "all_nse_stocks.pkl")
 
@@ -137,8 +161,11 @@ def get_all_nse_stocks():
         if age_hours < 24:
             with open(cache_path, "rb") as f:
                 data = pickle.load(f)
-            print(f"  Loaded {len(data):,} NSE-EQ stocks from cache ({age_hours:.1f}h old)")
-            return data
+            # Filter out ETFs from cached data too
+            filtered = {k: v for k, v in data.items() if not is_etf_or_liquid(k)}
+            print(f"  Loaded {len(filtered):,} NSE stocks from cache ({age_hours:.1f}h old)")
+            print(f"    (excluded {len(data) - len(filtered)} ETFs/liquid funds)")
+            return filtered
         print("  Cache >24h old — refreshing...")
 
     import requests
@@ -155,9 +182,9 @@ def get_all_nse_stocks():
         nse = df[df["exch_seg"] == "NSE"].copy()
         print(f"    Total NSE instruments: {len(nse):,}")
 
-        # Filter -EQ suffix (main equity series, excludes ETFs, bonds, etc.)
+        # Filter -EQ suffix (main equity series)
         eq = nse[nse["symbol"].str.endswith("-EQ", na=False)].copy()
-        print(f"    NSE-EQ stocks: {len(eq):,}")
+        print(f"    NSE-EQ instruments: {len(eq):,}")
 
         # Extract clean symbol name
         eq["sym"] = eq["symbol"].str.replace("-EQ", "", regex=False).str.strip()
@@ -165,12 +192,17 @@ def get_all_nse_stocks():
         # Create symbol -> token mapping
         stock_map = dict(zip(eq["sym"], eq["token"]))
 
-        # Cache it
+        # Filter out ETFs and liquid funds
+        stock_map_filtered = {k: v for k, v in stock_map.items() if not is_etf_or_liquid(k)}
+        excluded = len(stock_map) - len(stock_map_filtered)
+        print(f"    After excluding ETFs/liquid funds: {len(stock_map_filtered):,} stocks")
+        print(f"    (excluded {excluded} ETFs/liquid/index funds)")
+
+        # Cache unfiltered data (filter on load for flexibility)
         with open(cache_path, "wb") as f:
             pickle.dump(stock_map, f)
 
-        print(f"  Saved {len(stock_map):,} NSE-EQ stocks to cache")
-        return stock_map
+        return stock_map_filtered
 
     except Exception as e:
         print(f"  ERROR downloading scrip master: {e}")
