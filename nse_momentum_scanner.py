@@ -20,6 +20,7 @@ MOMENTUM RANKING:
 OUTPUT:
   - Console table with top momentum stocks
   - CSV export with full details
+  - Excel export (.xlsx) with full details
   - Ready for live trading signals
 
 =============================================================================
@@ -177,7 +178,7 @@ def get_all_nse_stocks():
 
 
 # =============================================================================
-# OHLC DATA FETCH
+# OHLC DATA FETCH WITH RETRY LOGIC
 # =============================================================================
 def fetch_ohlc(obj, token, symbol, from_date, to_date, max_retries=3):
     """Fetch OHLC data with caching and retry logic"""
@@ -425,7 +426,7 @@ def print_results(df, top_n=30):
               f"{row['sma10']:>9.2f} {row['sma20']:>9.2f} {row['sma50']:>9.2f}")
 
     if len(df) > top_n:
-        print(f"\n  ... and {len(df) - top_n} more stocks (see CSV for full list)")
+        print(f"\n  ... and {len(df) - top_n} more stocks (see CSV/Excel for full list)")
 
     print(sep)
 
@@ -441,8 +442,8 @@ def print_results(df, top_n=30):
         print(f"    {ht:>5}: {cnt:>4} stocks  (avg composite momentum: {avg_mom:>+.1f}%)")
 
 
-def export_results(df, filename="momentum_scan_results.csv"):
-    """Export results to CSV"""
+def export_results(df, csv_filename="momentum_scan_results.csv", excel_filename="momentum_scan_results.xlsx"):
+    """Export results to CSV and Excel"""
     if df.empty:
         return
 
@@ -454,8 +455,28 @@ def export_results(df, filename="momentum_scan_results.csv"):
         "sma10", "sma20", "sma50", "sma150", "sma200",
         "ath", "high_1y", "high_5y", "last_date"
     ]
-    df[cols].to_csv(filename, index=False)
-    print(f"\n  Results exported: {filename}")
+    export_df = df[cols].copy()
+
+    # Rename columns for better readability in Excel
+    export_df.columns = [
+        "Rank", "Symbol", "Price", "Near_High_Type", "Dist_From_High_%",
+        "ROC_20d_%", "ROC_60d_%", "ROC_90d_%", "Composite_Momentum_%",
+        "Rank_ROC20", "Rank_ROC60", "Rank_ROC90", "Rank_Composite",
+        "SMA10", "SMA20", "SMA50", "SMA150", "SMA200",
+        "ATH", "High_1Y", "High_5Y", "Last_Date"
+    ]
+
+    # Export to CSV
+    export_df.to_csv(csv_filename, index=False)
+    print(f"\n  CSV exported: {csv_filename}")
+
+    # Export to Excel
+    try:
+        export_df.to_excel(excel_filename, index=False, sheet_name="Momentum Stocks")
+        print(f"  Excel exported: {excel_filename}")
+    except Exception as e:
+        print(f"  Excel export failed: {e}")
+        print("  Install openpyxl: pip install openpyxl")
 
 
 # =============================================================================
@@ -570,3 +591,9 @@ if __name__ == "__main__":
             print(f"      Price: Rs {row['price']:.2f}  |  Near {row['near_high_type']} high ({row['dist_from_high']:.1f}% away)")
             print(f"      Momentum: 20d={row['roc_20']:+.1f}%  60d={row['roc_60']:+.1f}%  90d={row['roc_90']:+.1f}%")
             print(f"      SMA Stack: {row['price']:.0f} > {row['sma10']:.0f} > {row['sma20']:.0f} > {row['sma50']:.0f} > {row['sma150']:.0f} > {row['sma200']:.0f}")
+
+        print("\n" + "=" * 70)
+        print("  FILES EXPORTED:")
+        print("    - momentum_scan_results.csv  (opens in Excel)")
+        print("    - momentum_scan_results.xlsx (native Excel format)")
+        print("=" * 70)
