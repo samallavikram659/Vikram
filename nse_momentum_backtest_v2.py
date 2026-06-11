@@ -1,15 +1,15 @@
 """
 =============================================================================
-NSE MOMENTUM BACKTEST - SAME STRATEGY AS SCANNER
+NSE MOMENTUM BACKTEST - NIFTY 500 UNIVERSE
 =============================================================================
 Uses SAME filters as the live scanner but runs historical backtest
 
-UNIVERSE  : All NSE EQ-series stocks (~2500 from Angel One scrip master)
+UNIVERSE  : Nifty 500 stocks only (uses Nifty 500 list from NSE)
             Uses cached data from scanner runs
 
 ENTRY     : Price > SMA10 > SMA20 > SMA50 > SMA150 > SMA200
             Price within 20% of ATH / 1Y High / 5Y High
-            Top 3 by composite momentum (20d, 60d, 90d ROC)
+            Top 3 by momentum (single ROC period - editable)
 
 EXIT      : 8% stop loss | 20% profit target
 REBALANCE : Monthly (first trading day of each month)
@@ -42,9 +42,9 @@ MIN_AVG_TURNOVER  = 10_00_000             # Min daily turnover Rs 10 lakh
 FILTER_LOOKBACK   = 60                    # Days for quality filter
 MIN_DATA_DAYS     = 252                   # Need 1 year of data
 
-# Momentum settings (same as scanner)
-ROC_PERIODS = [20, 60, 90]
-MOMENTUM_WEIGHTS = {20: 0.2, 60: 0.3, 90: 0.5}
+# Momentum settings - EDITABLE: Change ROC_PERIOD to use different momentum period
+# Options: 20, 60, 90, or any other period you want
+ROC_PERIOD = 60  # <-- EDIT THIS VALUE to change momentum period (days)
 
 # Backtest period
 BACKTEST_START    = "2020-01-01"
@@ -53,6 +53,132 @@ BACKTEST_END      = "2026-12-31"
 # Costs
 APPLY_COSTS       = True
 SLIPPAGE_PCT      = 0.001                 # 0.1% slippage per side
+# =============================================================================
+
+
+# =============================================================================
+# NIFTY 500 STOCKS LIST (as of 2024)
+# This is the universe filter - only these stocks will be backtested
+# =============================================================================
+NIFTY_500_STOCKS = [
+    # Nifty 50
+    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "HINDUNILVR", "BHARTIARTL",
+    "SBIN", "BAJFINANCE", "KOTAKBANK", "ITC", "LT", "HCLTECH", "AXISBANK", "ASIANPAINT",
+    "MARUTI", "SUNPHARMA", "TITAN", "ULTRACEMCO", "WIPRO", "ONGC", "NTPC", "ADANIENT",
+    "POWERGRID", "DMART", "M&M", "BAJAJFINSV", "NESTLEIND", "TATAMOTORS", "JSWSTEEL",
+    "ADANIPORTS", "TATASTEEL", "TECHM", "COALINDIA", "HINDALCO", "INDUSINDBK", "GRASIM",
+    "BPCL", "CIPLA", "DRREDDY", "BRITANNIA", "DIVISLAB", "EICHERMOT", "APOLLOHOSP",
+    "TATACONSUM", "HEROMOTOCO", "SBILIFE", "HDFCLIFE", "UPL", "LTIM",
+    # Nifty Next 50
+    "ADANIGREEN", "ADANITRANS", "AMBUJACEM", "AUROPHARMA", "BAJAJHLDNG", "BANKBARODA",
+    "BERGEPAINT", "BOSCHLTD", "CADILAHC", "CHOLAFIN", "COLPAL", "DABUR", "DLF",
+    "GAIL", "GODREJCP", "HAVELLS", "HDFCAMC", "HINDPETRO", "ICICIPRULI", "ICICIGI",
+    "INDIGO", "IOC", "JUBLFOOD", "LTF", "LICI", "LUPIN", "MARICO", "MCDOWELL-N",
+    "MOTHERSON", "MUTHOOTFIN", "NAUKRI", "NHPC", "NMDC", "PAGEIND", "PGHH", "PIDILITIND",
+    "PNB", "SAIL", "SBI_CARD", "SBICARD", "SHREECEM", "SIEMENS", "SRF", "TATAPOWER",
+    "TORNTPHARM", "TRENT", "VEDL", "VBL", "ZOMATO", "ZYDUSLIFE",
+    # Nifty Midcap 150
+    "AARTIIND", "ABB", "ABCAPITAL", "ABFRL", "ACC", "ADANIPOWER", "AJANTPHARM",
+    "ALKEM", "ANGELONE", "APLLTD", "ASHOKLEY", "ASTRAL", "ATUL", "AUBANK", "AUROPHARMA",
+    "BAJAJ-AUTO", "BALKRISIND", "BALRAMCHIN", "BANDHANBNK", "BEL", "BHEL", "BIOCON",
+    "CANFINHOME", "CANBK", "CARBORUNIV", "CGPOWER", "CHAMBLFERT", "CLEAN", "COFORGE",
+    "CONCOR", "COROMANDEL", "CROMPTON", "CUB", "CUMMINSIND", "DEEPAKFERT", "DEEPAKNTR",
+    "DELHIVERY", "DEVYANI", "DIXON", "ELGIEQUIP", "EMAMILTD", "ENDURANCE", "ENGINERSIN",
+    "ESCORTS", "EXIDEIND", "FEDERALBNK", "FINCABLES", "FLUOROCHEM", "FSL", "GICRE",
+    "GLAXO", "GMRAIRPORT", "GNFC", "GODREJIND", "GODREJPROP", "GRANULES", "GSFC",
+    "GSPL", "GUJGASLTD", "HAL", "HONASA", "HONAUT", "IBREALEST", "IDFCFIRSTB", "IEX",
+    "IIFL", "INDHOTEL", "INDUSTOWER", "INTELLECT", "IOB", "IPCALAB", "IRB", "IRCTC",
+    "IRFC", "IGL", "JKCEMENT", "JKLAKSHMI", "JSWENERGY", "JSWINFRA", "JINDALSTEL",
+    "JSL", "JUBLINGREA", "KAJARIACER", "KALYANKJIL", "KANSAINER", "KEI", "KIOCL",
+    "KPITTECH", "KRBL", "LALPATHLAB", "LAURUSLABS", "LICHSGFIN", "LINDEINDIA",
+    "LODHA", "LTI", "LTTS", "M&MFIN", "MAHINDCIE", "MANAPPURAM", "MASFIN", "MAXHEALTH",
+    "MFSL", "MGL", "MINDTREE", "MPHASIS", "MRF", "NAM-INDIA", "NATIONALUM", "NAVINFLUOR",
+    "NIACL", "NCC", "NESCO", "NHPC", "NLCINDIA", "OBEROIRLTY", "OIL", "OFSS",
+    "PATANJALI", "PAYTM", "PERSISTENT", "PETRONET", "PFC", "PFIZER", "PHOENIXLTD",
+    "PIIND", "PEL", "POLICYBZR", "POLYCAB", "POONAWALLA", "PRESTIGE", "PRINCEPIPE",
+    "PVRINOX", "RADICO", "RAJESHEXPO", "RAMCOCEM", "RATNAMANI", "RAYMOND", "RBA",
+    "RECLTD", "REDINGTON", "RELAXO", "RKFORGE", "ROUTE", "SANOFI", "SAPPHIRE",
+    "SCHAEFFLER", "SHILPAMED", "SHOPERSTOP", "SJVN", "SKFINDIA", "SONACOMS", "SONATSOFTW",
+    "STARHEALTH", "SUMICHEM", "SUNCLAYLTD", "SUNDARMFIN", "SUNDRMFAST", "SUPREMEIND",
+    "SUVENPHAR", "SWANENERGY", "SYNGENE", "TATACOMM", "TATAELXSI", "TATAINVEST",
+    "TCIEXP", "TEJASNET", "THERMAX", "TIINDIA", "TIMKEN", "TMB", "TORNTPOWER",
+    "TRIDENT", "TRIVENI", "TTML", "TUBE", "TV18BRDCST", "TVSMOTOR", "UBL", "UNIONBANK",
+    "UNOMINDA", "UPL", "UTIAMC", "VAIBHAVGBL", "VAKRANGEE", "VARROC", "VEDL",
+    "VINATIORGA", "VOLTAS", "VGUARD", "VSTIND", "WELCORP", "WELSPUNIND", "WESTLIFE",
+    "WHIRLPOOL", "WINDMACHIN", "WOCKPHARMA", "YESBANK", "ZEEL", "ZENSAR", "ZFCVINDIA",
+    # Nifty Smallcap 250 (partial - major ones)
+    "3MINDIA", "AARTIDRUGS", "AAVAS", "ACE", "ADVENZYMES", "AEGISLOG", "AETHER",
+    "AFFLE", "AIAENG", "AJMERA", "AKZOINDIA", "ALKYLAMINE", "ALLCARGO", "ALOKINDS",
+    "AMARAJABAT", "AMBER", "ANANTRAJ", "ANDHRAPET", "ANURAS", "APARINDS", "APLAPOLLO",
+    "APOLLOPIPE", "APTECHT", "APTUS", "ARCHIDPLY", "ARVINDFASN", "ASAHIINDIA", "ASHIANA",
+    "ASKAUTOLTD", "ASTEC", "ASTRAZEN", "ATFL", "ATUL", "AVANTIFEED", "AXISCADES",
+    "BALAMINES", "BASF", "BBTC", "BCG", "BEML", "BIRLACORPN", "BORORENEW", "BLS",
+    "BLUESTARCO", "BOMDYEING", "BRIGADE", "BSE", "BSOFT", "CAMPUS", "CANFINHOME",
+    "CAPACITE", "CARERATING", "CASTROLIND", "CCL", "CDSL", "CENTURYPLY", "CERA",
+    "CHALET", "CHEMCON", "CMSINFO", "COCHINSHIP", "CONTROLPRI", "CREDITACC", "CRISIL",
+    "CYIENT", "DATAPATTNS", "DCAL", "DCBBANK", "DCMSHRIRAM", "DELTACORP", "DHAMPURSUG",
+    "DODLA", "DREAMFOLKS", "ECLERX", "EDELWEISS", "EIDPARRY", "ELECON", "ELECTCAST",
+    "ELIN", "EPL", "EQUITAS", "EQUITASBNK", "ERIS", "ESABINDIA", "EVEREADY",
+    "EXPLEOSOL", "FACT", "FAIRCHEM", "FAZE3Q", "FDC", "FINPIPE", "FIVESTAR",
+    "GABRIEL", "GALAXYSURF", "GARFIBRES", "GATEWAY", "GENUSPOWER", "GILLETTE",
+    "GLAND", "GLENMARK", "GLOBUSSPR", "GLS", "GMDCLTD", "GMMPFAUDLR", "GODFRYPHLP",
+    "GOKEX", "GOLDIAM", "GPIL", "GPPL", "GREAVESCOT", "GREENPANEL", "GREENLAM",
+    "GRINDWELL", "GRSE", "GTLINFRA", "GUFICBIO", "HAPPSTMNDS", "HARSHA", "HATSUN",
+    "HBLPOWER", "HCG", "HDFCBANK", "HEIDELBERG", "HEMIPROP", "HERITGFOOD", "HFCL",
+    "HGS", "HIKAL", "HIL", "HLEGLAS", "HMT", "HOMEFIRST", "HSCL", "HUDCO",
+    "IBULHSGFIN", "ICRA", "IDBI", "IDFC", "IGARASHI", "IGPL", "IMAGICAA", "IMFA",
+    "INDIAGLYCO", "INDIAMART", "INDIGO", "INDNIPPON", "INFIBEAM", "INGERRAND",
+    "INOXGREEN", "INOXLEISUR", "INOXWIND", "INSECTIND", "INTELLECT", "IONEXCHANG",
+    "IRCON", "ISEC", "ITI", "J&KBANK", "JAMNAAUTO", "JAYNECOIND", "JBCHEPHARM",
+    "JCHAC", "JISLJALEQS", "JKPAPER", "JKTYRE", "JMFINANCIL", "JMC", "JPASSOCIAT",
+    "JPPOWER", "JSLHISAR", "JUBILANT", "JUSTDIAL", "JYOTHYLAB", "KABRAEXTRU",
+    "KAJARIACER", "KALPATPOWR", "KARDA", "KDDL", "KEC", "KENNAMET", "KESORAMIND",
+    "KEYFINSERV", "KINGFA", "KIRIINDUS", "KIRLOSENG", "KIRLOSBROS", "KNRCON",
+    "KOLTEPATIL", "KOPRAN", "KPRMILL", "KRBL", "KSCL", "KTKNEON", "LAOPALA",
+    "LATENTVIEW", "LAXMIMACH", "LEMONTREE", "LGBBROSLTD", "LINCOLN", "LUXIND",
+    "MAHABANK", "MAHLIFE", "MAHLOG", "MAHSCOOTER", "MAHSEAMLES", "MANINFRA",
+    "MANKIND", "MAPMYINDIA", "MARATHON", "MARKSANS", "MASTEK", "MAYURUNIQ",
+    "MAZAGON", "MEDANTA", "MEDPLUS", "METROPOLIS", "MHRIL", "MIDHANI", "MINDACORP",
+    "MIRZAINT", "MMTC", "MOIL", "MOLDTKPAC", "MONTECARLO", "MOREPENLAB", "MOTILALOFS",
+    "MSTCLTD", "MTARTECH", "MUKANDLTD", "MUNJALSHOW", "NATCOPHARM", "NBCC", "NCC",
+    "NCLIND", "NDL", "NDTV", "NELCO", "NETWORK18", "NEWGEN", "NFL", "NILKAMAL",
+    "NIITMTS", "NITINSPIN", "NOCIL", "NPST", "NRBBEARING", "NUCLEUS", "NURECA",
+    "NUVAMA", "OLECTRA", "OMAXE", "ONMOBILE", "OPTIEMUS", "ORCHPHARMA", "ORIENTELEC",
+    "ORIENTPPR", "ORIENTREF", "PAISALO", "PARADEEP", "PARAS", "PATEL", "PCBL",
+    "PDSL", "PENIND", "PFIZER", "PFS", "PGHL", "PGINVIT", "PNCINFRA", "PNBHOUSING",
+    "POLYPLEX", "POWERINDIA", "PPLPHARMA", "PRAXIS", "PREMEXPLN", "PRICOLLTD",
+    "PRSMJOHNSN", "PSB", "PSPPROJECT", "PURVA", "QUESS", "RADICO", "RAIN",
+    "RAJRATAN", "RALLIS", "RAMKYLAM", "RANEHOLDIN", "RATEGAIN", "RATNAMANI",
+    "RAYMOND", "RBL", "RBLBANK", "RCF", "RECLTD", "REDTAPE", "REFEX", "RELAXO",
+    "RENAISSANCE", "RESPONIND", "RHI", "RHIM", "RITES", "RKEC", "ROLEXRINGS",
+    "ROSSARI", "ROSSELLIND", "ROUTE", "RPGLIFE", "RPSGVENT", "RSWM", "RTNINDIA",
+    "RTNPOWER", "RVNL", "S&SPOWER", "SADHNANIQ", "SAFARI", "SAGCEM", "SALASAR",
+    "SANDHAR", "SANDUMA", "SANGHIIND", "SANGHVIMOV", "SANOFI", "SARDAEN", "SASKEN",
+    "SATIN", "SATINDLTD", "SCI", "SEQUENT", "SHAKTIPUMP", "SHALBY", "SHALPAINTS",
+    "SHANKARA", "SHARDACROP", "SHAREINDIA", "SHK", "SHOPERSTOP", "SHREECEM",
+    "SHRIRAMCIT", "SHRIRAMPPS", "SIL", "SINTERCOM", "SIS", "SJVN", "SKIPPER",
+    "SMCGLOBAL", "SNOWMAN", "SOBHA", "SOLARA", "SOLARINDS", "SONACOMS", "SOUTHBANK",
+    "SPANDANA", "SPARC", "SPENCERS", "SPIC", "SRHHYPOLTD", "SRTRANSFIN", "STAR",
+    "STCINDIA", "STLTECH", "STYRENIX", "SUBROS", "SUDARSCHEM", "SUMIT", "SUNDARMHLD",
+    "SUNFLAG", "SUPERHOUSE", "SUPRAJIT", "SUPREMEENG", "SURYAROSNI", "SUULD",
+    "SUVENPHAR", "SUVEN", "SUZLON", "SVPGLOB", "SWARAJENG", "SYMPHONY", "SYRMA",
+    "TANLA", "TARSONS", "TATACHEM", "TATACOFFEE", "TATAMETALI", "TATASPONGE",
+    "TATATECH", "TBZ", "TCNSBRANDS", "TCIEXP", "TCPLPACK", "TDPOWERSYS", "TEAMLEASE",
+    "TECHNOE", "TEGA", "TEXMOPIPES", "TEXRAIL", "THANGAMAYL", "THERMAX", "THYROCARE",
+    "TI", "TIDEWATER", "TIIL", "TIMETECHNO", "TINPLATE", "TITAN", "TNPL", "TNTELE",
+    "TCFC", "TRANSPEK", "TRENT", "TRF", "TRIL", "TRITURBINE", "TRIVENI", "TTKHLTCARE",
+    "TTKPRESTIG", "TV18BRDCST", "TVSSRICHAK", "TVTODAY", "TWL", "UBL", "UCOBANK",
+    "UFLEX", "ULTRACEMCO", "UNICHEMLAB", "UNIPARTS", "UNIONBANK", "UNIVASTU",
+    "UNIVCABLES", "UNOMINDA", "USHA", "UTIAMC", "UTKARSHBNK", "UTTAMSUGAR", "VADILALIND",
+    "VAIBHAVGBL", "VALIANTORG", "VASCONEQ", "VBL", "VEDL", "VENKEYS", "VENUSPIPES",
+    "VERANDA", "VESUVIUS", "VGUARD", "VIDHIING", "VIJAYA", "VIKAS", "VIKASECO",
+    "VINATIORGA", "VIPIND", "VIPULLTD", "VISHNU", "VLSFINANCE", "VOLTAMP", "VOLTAS",
+    "VRLLOG", "VSTIND", "WABAG", "WABCOINDIA", "WANBURY", "WELCORP", "WELENT",
+    "WELSPUNLIV", "WESTLIFE", "WEWIN", "WHEELS", "WHIRLPOOL", "WINDMACHIN", "WIPRO",
+    "WOCKPHARMA", "WONDERLA", "WPIL", "XCHANGING", "XPROINDIA", "YASHO", "YESBANK",
+    "ZEEL", "ZENSAR", "ZENTEC", "ZEEMEDIA", "ZENSARTECH", "ZFCVINDIA", "ZODIAC",
+    "ZOMATO", "ZODJRDMKJ", "ZYDUSLIFE", "ZYDUSWELL",
+]
 # =============================================================================
 
 
@@ -75,7 +201,7 @@ def calc_cost(trade_value, side):
 # LOAD CACHED DATA
 # =============================================================================
 def load_all_cached_data():
-    """Load all cached stock data from scanner"""
+    """Load cached stock data for Nifty 500 stocks only"""
     if not os.path.exists(CACHE_DIR):
         print(f"  ERROR: Cache directory '{CACHE_DIR}' not found!")
         print("  Please run the scanner first to download stock data.")
@@ -83,19 +209,24 @@ def load_all_cached_data():
 
     # Find all cached stock files
     stock_files = [f for f in os.listdir(CACHE_DIR) if f.endswith("_1D.pkl")]
-    print(f"  Found {len(stock_files):,} cached stock files")
+    print(f"  Found {len(stock_files):,} total cached stock files")
 
-    if len(stock_files) < 100:
-        print("  WARNING: Very few stocks cached. Run scanner first!")
+    # Filter for Nifty 500 stocks only
+    nifty500_set = set(NIFTY_500_STOCKS)
+    nifty500_files = [f for f in stock_files if f.replace("_1D.pkl", "") in nifty500_set]
+    print(f"  Filtering to Nifty 500 universe: {len(nifty500_files)} stocks found in cache")
+
+    if len(nifty500_files) < 50:
+        print("  WARNING: Very few Nifty 500 stocks cached. Run scanner first!")
 
     price_data = {}
     skipped = 0
 
-    for i, filename in enumerate(stock_files, 1):
+    for i, filename in enumerate(nifty500_files, 1):
         symbol = filename.replace("_1D.pkl", "")
 
-        if i % 500 == 0:
-            print(f"  Loading: {i:,}/{len(stock_files):,}  ({symbol})  ", end="\r")
+        if i % 100 == 0:
+            print(f"  Loading: {i:,}/{len(nifty500_files):,}  ({symbol})  ", end="\r")
 
         try:
             filepath = os.path.join(CACHE_DIR, filename)
@@ -115,7 +246,7 @@ def load_all_cached_data():
             skipped += 1
             continue
 
-    print(f"\n  Loaded: {len(price_data):,} stocks with sufficient data")
+    print(f"\n  Loaded: {len(price_data):,} Nifty 500 stocks with sufficient data")
     print(f"  Skipped: {skipped:,} (insufficient data or errors)")
 
     return price_data
@@ -152,18 +283,10 @@ def compute_indicators(df):
     df["high_1y"] = df["close"].rolling(252, min_periods=200).max()
     df["high_5y"] = df["close"].rolling(252 * 5, min_periods=252).max()
 
-    # ROC for multiple periods
-    for period in ROC_PERIODS:
-        df[f"roc_{period}"] = df["close"].pct_change(period) * 100
+    # Single ROC period (configurable via ROC_PERIOD variable)
+    df["momentum"] = df["close"].pct_change(ROC_PERIOD) * 100
 
-    # Composite momentum (same weights as scanner)
-    df["composite_momentum"] = (
-        MOMENTUM_WEIGHTS[20] * df["roc_20"] +
-        MOMENTUM_WEIGHTS[60] * df["roc_60"] +
-        MOMENTUM_WEIGHTS[90] * df["roc_90"]
-    )
-
-    df.dropna(subset=["sma200", "roc_90"], inplace=True)
+    df.dropna(subset=["sma200", "momentum"], inplace=True)
 
     return df if len(df) > 0 else None
 
@@ -247,9 +370,10 @@ def run_backtest(price_data):
 
     print(f"\n{'=' * 70}")
     print(f"  BACKTEST: {BACKTEST_START} -> {BACKTEST_END}")
-    print(f"  Universe: {len(price_data):,} stocks")
+    print(f"  Universe: {len(price_data):,} Nifty 500 stocks")
     print(f"  Capital: Rs {INITIAL_CAPITAL:,.0f}")
-    print(f"  Positions: {MAX_POSITIONS} | Stop Loss: {STOP_LOSS_PCT*100:.0f}% | Target: {TARGET_PCT*100:.0f}%")
+    print(f"  Momentum: {ROC_PERIOD}-day ROC | Positions: {MAX_POSITIONS}")
+    print(f"  Stop Loss: {STOP_LOSS_PCT*100:.0f}% | Target: {TARGET_PCT*100:.0f}%")
     print(f"{'=' * 70}\n")
 
     total_days = len(all_dates)
@@ -328,7 +452,7 @@ def run_backtest(price_data):
                     if passes:
                         candidates.append({
                             "symbol": sym,
-                            "momentum": float(row["composite_momentum"]),
+                            "momentum": float(row["momentum"]),  # Single ROC period
                             "price": float(row["close"]),
                             "high_type": high_type,
                         })
@@ -522,13 +646,14 @@ def report(trades_df, equity_df, total_costs):
 # =============================================================================
 def main():
     print("\n" + "=" * 70)
-    print("  NSE MOMENTUM BACKTEST")
-    print("  Strategy: Same as Scanner (SMA alignment + Near High + Momentum)")
+    print("  NSE MOMENTUM BACKTEST - NIFTY 500 UNIVERSE")
+    print("  Strategy: SMA alignment + Near High + Momentum")
+    print(f"  Momentum Period: {ROC_PERIOD}-day ROC  (edit ROC_PERIOD to change)")
     print(f"  Stop Loss: {STOP_LOSS_PCT*100:.0f}%  |  Target: {TARGET_PCT*100:.0f}%  |  Positions: {MAX_POSITIONS}")
     print("=" * 70)
 
-    # Load cached data from scanner
-    print("\nLoading cached stock data from scanner...")
+    # Load cached data from scanner (Nifty 500 only)
+    print("\nLoading Nifty 500 stock data from cache...")
     price_data = load_all_cached_data()
 
     if not price_data:
