@@ -64,7 +64,7 @@ ROC_PERIODS = [20, 60, 90]
 MOMENTUM_WEIGHTS = {20: 0.2, 60: 0.3, 90: 0.5}  # Favor longer-term momentum
 
 # How many days of historical data to fetch
-FETCH_YEARS = 6  # Need 5 years for 5Y high calculation
+FETCH_YEARS = 11  # Fetches from 2015 onwards for longer backtest
 # =============================================================================
 
 os.makedirs(CACHE_DIR, exist_ok=True)
