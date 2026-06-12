@@ -57,11 +57,8 @@ FILTER_LOOKBACK   = 60           # Days for price/volume filter
 NEAR_HIGH_PCT     = 0.20         # Within 20% of high
 MIN_DATA_DAYS     = 252          # Need 1 year of data minimum
 
-# Momentum periods
-ROC_PERIODS = [20, 60, 90]
-
-# Momentum weights for composite score
-MOMENTUM_WEIGHTS = {20: 0.2, 60: 0.3, 90: 0.5}  # Favor longer-term momentum
+# Momentum settings - EDITABLE: Change ROC_PERIOD to use different momentum period
+ROC_PERIOD = 60  # <-- EDIT THIS VALUE to change momentum period (days)
 
 # How many days of historical data to fetch
 FETCH_YEARS = 11  # Fetches from 2015 onwards for longer backtest
@@ -303,12 +300,11 @@ def compute_indicators(df):
     df["high_1y"] = df["close"].rolling(252, min_periods=200).max()  # 1-year high
     df["high_5y"] = df["close"].rolling(252 * 5, min_periods=252).max()  # 5-year high
 
-    # ROC (Rate of Change) for multiple periods
-    for period in ROC_PERIODS:
-        df[f"roc_{period}"] = df["close"].pct_change(period) * 100
+    # Single ROC period (configurable via ROC_PERIOD variable)
+    df["momentum"] = df["close"].pct_change(ROC_PERIOD) * 100
 
     # Drop rows with NaN in critical columns
-    df.dropna(subset=["sma200", "roc_90"], inplace=True)
+    df.dropna(subset=["sma200", "momentum"], inplace=True)
 
     return df if len(df) > 0 else None
 
@@ -368,18 +364,9 @@ def analyze_stock(symbol, df):
         return None  # Not near any high
 
     # =========================================================================
-    # MOMENTUM CALCULATIONS
+    # MOMENTUM CALCULATION (single ROC period)
     # =========================================================================
-    roc_20 = row["roc_20"]
-    roc_60 = row["roc_60"]
-    roc_90 = row["roc_90"]
-
-    # Composite momentum score (weighted average)
-    composite_momentum = (
-        MOMENTUM_WEIGHTS[20] * roc_20 +
-        MOMENTUM_WEIGHTS[60] * roc_60 +
-        MOMENTUM_WEIGHTS[90] * roc_90
-    )
+    momentum = row["momentum"]
 
     return {
         "symbol": symbol,
@@ -394,10 +381,7 @@ def analyze_stock(symbol, df):
         "high_5y": round(high_5y, 2),
         "near_high_type": near_high_type,
         "dist_from_high": round(near_high_dist, 2),
-        "roc_20": round(roc_20, 2),
-        "roc_60": round(roc_60, 2),
-        "roc_90": round(roc_90, 2),
-        "composite_momentum": round(composite_momentum, 2),
+        "momentum": round(momentum, 2),
         "last_date": str(df.index[-1].date()),
     }
 
@@ -415,14 +399,8 @@ def calculate_relative_momentum(results_df):
 
     df = results_df.copy()
 
-    # Rank by each ROC period (lower rank = higher momentum)
-    df["rank_roc_20"] = df["roc_20"].rank(ascending=False, method="min").astype(int)
-    df["rank_roc_60"] = df["roc_60"].rank(ascending=False, method="min").astype(int)
-    df["rank_roc_90"] = df["roc_90"].rank(ascending=False, method="min").astype(int)
-    df["rank_composite"] = df["composite_momentum"].rank(ascending=False, method="min").astype(int)
-
-    # Final rank based on composite
-    df = df.sort_values("rank_composite")
+    # Rank by momentum (higher momentum = lower rank number)
+    df = df.sort_values("momentum", ascending=False)
     df["final_rank"] = range(1, len(df) + 1)
 
     return df
@@ -437,24 +415,22 @@ def print_results(df, top_n=30):
         print("\n  No stocks matched the criteria.")
         return
 
-    sep = "=" * 140
+    sep = "=" * 100
     print(f"\n{sep}")
-    print("  NSE MOMENTUM SCANNER - LIVE RESULTS (ALL NSE STOCKS)")
+    print(f"  NSE MOMENTUM SCANNER - LIVE RESULTS ({ROC_PERIOD}-day ROC)")
     print(f"  Scan Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Stocks Passing Filters: {len(df)}")
     print(sep)
 
     # Header
     print(f"\n  {'Rank':<5} {'Symbol':<15} {'Price':>10} {'High':>6} {'Dist%':>7} "
-          f"{'ROC20':>8} {'ROC60':>8} {'ROC90':>8} {'Composite':>10} "
-          f"{'SMA10':>9} {'SMA20':>9} {'SMA50':>9}")
-    print("  " + "-" * 130)
+          f"{'Momentum':>10} {'SMA10':>9} {'SMA20':>9} {'SMA50':>9}")
+    print("  " + "-" * 90)
 
     for idx, row in df.head(top_n).iterrows():
         print(f"  {row['final_rank']:<5} {row['symbol']:<15} "
               f"{row['price']:>10.2f} {row['near_high_type']:>6} {row['dist_from_high']:>6.1f}% "
-              f"{row['roc_20']:>+7.1f}% {row['roc_60']:>+7.1f}% {row['roc_90']:>+7.1f}% "
-              f"{row['composite_momentum']:>+9.1f}% "
+              f"{row['momentum']:>+9.1f}% "
               f"{row['sma10']:>9.2f} {row['sma20']:>9.2f} {row['sma50']:>9.2f}")
 
     if len(df) > top_n:
@@ -463,15 +439,13 @@ def print_results(df, top_n=30):
     print(sep)
 
     # Summary stats
-    print("\n  MOMENTUM DISTRIBUTION:")
-    print(f"    Avg ROC 20-day:  {df['roc_20'].mean():>+6.1f}%  (range: {df['roc_20'].min():>+.1f}% to {df['roc_20'].max():>+.1f}%)")
-    print(f"    Avg ROC 60-day:  {df['roc_60'].mean():>+6.1f}%  (range: {df['roc_60'].min():>+.1f}% to {df['roc_60'].max():>+.1f}%)")
-    print(f"    Avg ROC 90-day:  {df['roc_90'].mean():>+6.1f}%  (range: {df['roc_90'].min():>+.1f}% to {df['roc_90'].max():>+.1f}%)")
+    print(f"\n  MOMENTUM DISTRIBUTION ({ROC_PERIOD}-day ROC):")
+    print(f"    Avg: {df['momentum'].mean():>+6.1f}%  (range: {df['momentum'].min():>+.1f}% to {df['momentum'].max():>+.1f}%)")
 
     print("\n  HIGH TYPE BREAKDOWN:")
     for ht, cnt in df["near_high_type"].value_counts().items():
-        avg_mom = df[df["near_high_type"] == ht]["composite_momentum"].mean()
-        print(f"    {ht:>5}: {cnt:>4} stocks  (avg composite momentum: {avg_mom:>+.1f}%)")
+        avg_mom = df[df["near_high_type"] == ht]["momentum"].mean()
+        print(f"    {ht:>5}: {cnt:>4} stocks  (avg momentum: {avg_mom:>+.1f}%)")
 
 
 def export_results(df, csv_filename="momentum_scan_results.csv", excel_filename="momentum_scan_results.xlsx"):
@@ -482,9 +456,7 @@ def export_results(df, csv_filename="momentum_scan_results.csv", excel_filename=
     # Reorder columns for export
     cols = [
         "final_rank", "symbol", "price", "near_high_type", "dist_from_high",
-        "roc_20", "roc_60", "roc_90", "composite_momentum",
-        "rank_roc_20", "rank_roc_60", "rank_roc_90", "rank_composite",
-        "sma10", "sma20", "sma50", "sma150", "sma200",
+        "momentum", "sma10", "sma20", "sma50", "sma150", "sma200",
         "ath", "high_1y", "high_5y", "last_date"
     ]
     export_df = df[cols].copy()
@@ -492,9 +464,7 @@ def export_results(df, csv_filename="momentum_scan_results.csv", excel_filename=
     # Rename columns for better readability in Excel
     export_df.columns = [
         "Rank", "Symbol", "Price", "Near_High_Type", "Dist_From_High_%",
-        "ROC_20d_%", "ROC_60d_%", "ROC_90d_%", "Composite_Momentum_%",
-        "Rank_ROC20", "Rank_ROC60", "Rank_ROC90", "Rank_Composite",
-        "SMA10", "SMA20", "SMA50", "SMA150", "SMA200",
+        f"Momentum_{ROC_PERIOD}d_%", "SMA10", "SMA20", "SMA50", "SMA150", "SMA200",
         "ATH", "High_1Y", "High_5Y", "Last_Date"
     ]
 
@@ -520,8 +490,8 @@ def run_scanner():
     print("  NSE MOMENTUM SCANNER - ALL NSE STOCKS")
     print("  Source: Angel One Scrip Master (~2500 NSE-EQ stocks)")
     print("  Filter: Price > SMA10 > SMA20 > SMA50 > SMA150 > SMA200")
-    print("  Filter: Within 20% of ATH / 1Y High / 5Y High")
-    print("  Ranking: Relative momentum (20d, 60d, 90d ROC)")
+    print(f"  Filter: Within {NEAR_HIGH_PCT*100:.0f}% of ATH / 1Y High / 5Y High")
+    print(f"  Ranking: {ROC_PERIOD}-day ROC momentum")
     print("=" * 70)
 
     # Validate and login
@@ -616,12 +586,12 @@ if __name__ == "__main__":
     # Print top 10 trading signals
     if not results.empty:
         print("\n" + "=" * 70)
-        print("  TOP 10 TRADING SIGNALS")
+        print(f"  TOP 10 TRADING SIGNALS ({ROC_PERIOD}-day momentum)")
         print("=" * 70)
         for i, row in results.head(10).iterrows():
             print(f"\n  #{row['final_rank']} {row['symbol']}")
             print(f"      Price: Rs {row['price']:.2f}  |  Near {row['near_high_type']} high ({row['dist_from_high']:.1f}% away)")
-            print(f"      Momentum: 20d={row['roc_20']:+.1f}%  60d={row['roc_60']:+.1f}%  90d={row['roc_90']:+.1f}%")
+            print(f"      Momentum: {ROC_PERIOD}d = {row['momentum']:+.1f}%")
             print(f"      SMA Stack: {row['price']:.0f} > {row['sma10']:.0f} > {row['sma20']:.0f} > {row['sma50']:.0f} > {row['sma150']:.0f} > {row['sma200']:.0f}")
 
         print("\n" + "=" * 70)
