@@ -13,6 +13,9 @@ EXIT      : Stop loss | Profit target
 REBALANCE : Monthly (first trading day of each month)
 POSITIONS : 3 (equal weight)
 COSTS     : Full NSE equity delivery charges + slippage
+
+NOTE      : First run fetches data from Angel One (~6-10 hours)
+            Subsequent runs use cached data (instant)
 =============================================================================
 """
 
@@ -25,10 +28,22 @@ import numpy as np
 import warnings
 warnings.filterwarnings("ignore")
 
+from SmartApi import SmartConnect
+import pyotp
+
+# =============================================================================
+# CREDENTIALS - UPDATE THESE
+# =============================================================================
+API_KEY      = os.environ.get("ANGEL_API_KEY", "Tp7PJMIc")
+CLIENT_ID    = os.environ.get("ANGEL_CLIENT_ID", "S63068620")
+PASSWORD     = os.environ.get("ANGEL_PASSWORD", "4098")
+TOTP_SECRET  = os.environ.get("ANGEL_TOTP_SECRET", "KVTELUFGR33YCPQUKO3ZSL4NMA")
+# =============================================================================
+
 # =============================================================================
 # BACKTEST CONFIG - EDIT THESE VALUES
 # =============================================================================
-CACHE_DIR         = "cache_scanner"      # Use same cache as scanner
+CACHE_DIR         = "cache_scanner"      # Cache folder for stock data
 INITIAL_CAPITAL   = 1_00_000             # Rs 1 lakh starting capital
 MAX_POSITIONS     = 3                     # Hold 3 stocks at a time
 STOP_LOSS_PCT     = 0.05                  # 5% stop loss
@@ -42,6 +57,9 @@ MIN_DATA_DAYS     = 252                   # Need 1 year of data
 # Momentum settings - EDITABLE
 ROC_PERIOD = 20  # <-- EDIT THIS VALUE (20, 60, 90, etc.)
 
+# How many years of data to fetch
+FETCH_YEARS = 11  # Fetches from 2015 onwards
+
 # Backtest period
 BACKTEST_START    = "2016-01-01"
 BACKTEST_END      = "2026-12-31"
@@ -50,6 +68,8 @@ BACKTEST_END      = "2026-12-31"
 APPLY_COSTS       = True
 SLIPPAGE_PCT      = 0.001                 # 0.1% slippage per side
 # =============================================================================
+
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 
 # =============================================================================
@@ -72,6 +92,163 @@ def is_etf_or_liquid(symbol):
         if pattern in sym_upper:
             return True
     return False
+
+
+# =============================================================================
+# AUTHENTICATION HELPERS
+# =============================================================================
+def fix_totp(raw):
+    s = raw.strip().upper().replace(" ", "").replace("-", "")
+    return s + "=" * ((8 - len(s) % 8) % 8)
+
+
+def validate_credentials():
+    placeholders = {"your_api_key", "your_password", "your_totp_secret", ""}
+    errors = []
+    if API_KEY.strip() in placeholders:
+        errors.append("API_KEY not set")
+    if PASSWORD.strip() in placeholders:
+        errors.append("PASSWORD not set")
+    if TOTP_SECRET.strip() in placeholders:
+        errors.append("TOTP_SECRET not set")
+    if errors:
+        print("\n" + "=" * 60)
+        print("  CREDENTIALS NOT CONFIGURED")
+        print("=" * 60)
+        for e in errors:
+            print(f"  x  {e}")
+        raise SystemExit(1)
+    import base64
+    fixed = fix_totp(TOTP_SECRET)
+    try:
+        base64.b32decode(fixed, casefold=True)
+    except Exception as e:
+        print(f"  TOTP_SECRET invalid: {e}")
+        raise SystemExit(1)
+    return fixed
+
+
+def login(totp_fixed):
+    obj = SmartConnect(api_key=API_KEY)
+    otp = pyotp.TOTP(totp_fixed).now()
+    secs = 30 - datetime.datetime.now().second % 30
+    print(f"  OTP: {otp}  (valid ~{secs}s)")
+    data = obj.generateSession(CLIENT_ID, PASSWORD, otp)
+    if not isinstance(data, dict):
+        raise Exception(f"Unexpected response: {data}")
+    status = data.get("status")
+    if status is True or str(status).lower() == "true":
+        print(f"  JWT: {str(data.get('data', {}).get('jwtToken', ''))[:30]}...")
+        return obj
+    raise Exception(f"Login failed: {data.get('errorcode', '?')} | {data.get('message', str(data))}")
+
+
+# =============================================================================
+# GET ALL NSE STOCKS FROM ANGEL ONE SCRIP MASTER
+# =============================================================================
+def get_all_nse_stocks():
+    cache_path = os.path.join(CACHE_DIR, "all_nse_stocks.pkl")
+
+    if os.path.exists(cache_path):
+        age_hours = (time.time() - os.path.getmtime(cache_path)) / 3600
+        if age_hours < 24:
+            with open(cache_path, "rb") as f:
+                data = pickle.load(f)
+            filtered = {k: v for k, v in data.items() if not is_etf_or_liquid(k)}
+            print(f"  Loaded {len(filtered):,} NSE stocks from cache ({age_hours:.1f}h old)")
+            return filtered
+        print("  Cache >24h old — refreshing...")
+
+    import requests
+    print("  Downloading Angel One scrip master (all NSE stocks)...")
+
+    try:
+        resp = requests.get(
+            "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json",
+            timeout=60
+        )
+        df = pd.DataFrame(resp.json())
+
+        nse = df[df["exch_seg"] == "NSE"].copy()
+        print(f"    Total NSE instruments: {len(nse):,}")
+
+        eq = nse[nse["symbol"].str.endswith("-EQ", na=False)].copy()
+        print(f"    NSE-EQ instruments: {len(eq):,}")
+
+        eq["sym"] = eq["symbol"].str.replace("-EQ", "", regex=False).str.strip()
+        stock_map = dict(zip(eq["sym"], eq["token"]))
+
+        stock_map_filtered = {k: v for k, v in stock_map.items() if not is_etf_or_liquid(k)}
+        excluded = len(stock_map) - len(stock_map_filtered)
+        print(f"    After excluding ETFs/liquid funds: {len(stock_map_filtered):,} stocks")
+
+        with open(cache_path, "wb") as f:
+            pickle.dump(stock_map, f)
+
+        return stock_map_filtered
+
+    except Exception as e:
+        print(f"  ERROR downloading scrip master: {e}")
+        raise SystemExit(1)
+
+
+# =============================================================================
+# OHLC DATA FETCH WITH RETRY LOGIC
+# =============================================================================
+def fetch_ohlc(obj, token, symbol, from_date, to_date, max_retries=3):
+    cache_path = os.path.join(CACHE_DIR, f"{symbol}_1D.pkl")
+
+    if os.path.exists(cache_path):
+        cache_age_days = (time.time() - os.path.getmtime(cache_path)) / 86400
+        if cache_age_days < 1:
+            with open(cache_path, "rb") as f:
+                df = pickle.load(f)
+            if not df.empty:
+                return df
+
+    rows = []
+    cur = pd.Timestamp(from_date)
+    end = pd.Timestamp(to_date)
+
+    while cur <= end:
+        nxt = min(cur + pd.DateOffset(days=400), end)
+
+        for attempt in range(max_retries):
+            try:
+                r = obj.getCandleData({
+                    "exchange": "NSE",
+                    "symboltoken": token,
+                    "interval": "ONE_DAY",
+                    "fromdate": cur.strftime("%Y-%m-%d %H:%M"),
+                    "todate": nxt.strftime("%Y-%m-%d %H:%M"),
+                })
+                if r.get("status") and r.get("data"):
+                    rows.extend(r["data"])
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+
+        cur = nxt + pd.DateOffset(days=1)
+        time.sleep(0.4)
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows, columns=["datetime", "open", "high", "low", "close", "volume"])
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.drop_duplicates("datetime").sort_values("datetime").set_index("datetime")
+    df.index = df.index.tz_localize(None)
+
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df.dropna(subset=["close"], inplace=True)
+
+    if not df.empty:
+        with open(cache_path, "wb") as f:
+            pickle.dump(df, f)
+
+    return df
 
 
 # =============================================================================
@@ -123,16 +300,27 @@ def compute_indicators(df):
 
 
 # =============================================================================
-# LOAD CACHED DATA
+# LOAD OR FETCH DATA
 # =============================================================================
-def load_all_cached_data():
-    if not os.path.exists(CACHE_DIR):
-        print(f"  ERROR: Cache directory '{CACHE_DIR}' not found!")
-        print("  Please run the scanner first to download stock data.")
-        raise SystemExit(1)
+def load_or_fetch_data():
+    """Load cached data or fetch from Angel One if cache is empty"""
 
+    # Check if we have cached data
     stock_files = [f for f in os.listdir(CACHE_DIR) if f.endswith("_1D.pkl")]
-    print(f"  Found {len(stock_files):,} total cached stock files")
+
+    if len(stock_files) >= 100:
+        # Use cached data
+        print(f"  Found {len(stock_files):,} cached stock files - using cache")
+        return load_cached_data()
+    else:
+        # Need to fetch data
+        print(f"  Only {len(stock_files)} cached files - fetching from Angel One...")
+        return fetch_all_data()
+
+
+def load_cached_data():
+    """Load data from cache"""
+    stock_files = [f for f in os.listdir(CACHE_DIR) if f.endswith("_1D.pkl")]
 
     filtered_files = []
     excluded_count = 0
@@ -174,6 +362,75 @@ def load_all_cached_data():
 
     print(f"\n  Loaded: {len(price_data):,} stocks with sufficient data")
     print(f"  Skipped: {skipped:,} (insufficient data or errors)")
+
+    return price_data
+
+
+def fetch_all_data():
+    """Fetch data from Angel One API"""
+
+    # Login
+    totp_fixed = validate_credentials()
+    print("\nLogging in to Angel One...")
+    print(f"  API_KEY   : {API_KEY[:6]}{'*' * 8}  CLIENT_ID: {CLIENT_ID}")
+
+    try:
+        obj = login(totp_fixed)
+        print("  LOGIN SUCCESSFUL\n")
+    except Exception as e:
+        print(f"\n  LOGIN FAILED: {e}")
+        raise SystemExit(1)
+
+    # Get stock list
+    print("Loading ALL NSE stocks from Angel One scrip master...")
+    all_stocks = get_all_nse_stocks()
+    total = len(all_stocks)
+    print(f"  Total NSE-EQ stocks to fetch: {total:,}")
+
+    # Date range
+    fetch_end = datetime.date.today().strftime("%Y-%m-%d")
+    fetch_start = (datetime.date.today() - datetime.timedelta(days=365 * FETCH_YEARS)).strftime("%Y-%m-%d")
+
+    # Count cached
+    cached = sum(1 for s in all_stocks if os.path.exists(os.path.join(CACHE_DIR, f"{s}_1D.pkl")))
+    new_fetch = total - cached
+
+    print(f"\nFetching {total:,} stocks...")
+    print(f"  Already cached: {cached:,} (instant)")
+    print(f"  Need to fetch: {new_fetch:,} (ETA ~{new_fetch * 2.5 / 60:.0f} min)\n")
+
+    price_data = {}
+    skipped = 0
+    filtered_out = 0
+    t0 = time.time()
+
+    for i, (sym, tok) in enumerate(all_stocks.items(), 1):
+        elapsed = time.time() - t0
+        rate = i / max(elapsed, 1)
+        eta_s = (total - i) / rate if rate > 0 else 0
+
+        print(f"  [{i:4d}/{total}] {sym:<18} loaded:{len(price_data):3d}  ETA:{eta_s/60:.1f}min  ", end="\r")
+
+        # Fetch data
+        df = fetch_ohlc(obj, tok, sym, fetch_start, fetch_end)
+        if df is None or len(df) < MIN_DATA_DAYS:
+            skipped += 1
+            continue
+
+        # Compute indicators
+        df_ind = compute_indicators(df)
+        if df_ind is None:
+            filtered_out += 1
+            continue
+
+        price_data[sym] = df_ind
+
+    elapsed_m = (time.time() - t0) / 60
+    print(f"\n\n  Fetch complete in {elapsed_m:.1f} min")
+    print(f"  Total fetched: {total:,}")
+    print(f"  Insufficient data: {skipped:,}")
+    print(f"  Filtered out (price/volume): {filtered_out:,}")
+    print(f"  Ready for backtest: {len(price_data)}")
 
     return price_data
 
@@ -509,11 +766,11 @@ def main():
     print(f"  Near High: {NEAR_HIGH_PCT*100:.0f}%")
     print("=" * 70)
 
-    print("\nLoading stock data from cache (excluding ETF/Liquid/Index)...")
-    price_data = load_all_cached_data()
+    print("\nLoading stock data...")
+    price_data = load_or_fetch_data()
 
     if not price_data:
-        print("\n  ERROR: No stock data found. Run the scanner first!")
+        print("\n  ERROR: No stock data available!")
         raise SystemExit(1)
 
     trades_df, equity_df, total_costs = run_backtest(price_data)
