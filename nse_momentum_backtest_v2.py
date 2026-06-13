@@ -2,21 +2,17 @@
 =============================================================================
 NSE MOMENTUM BACKTEST - ALL NSE STOCKS (NO ETF/LIQUID/INDICES)
 =============================================================================
-Uses SAME filters as the live scanner but runs historical backtest
-
 UNIVERSE  : All NSE EQ-series stocks (~2500 from Angel One scrip master)
             Excludes: ETFs, Liquid Funds, Bonds, Index Funds, BE series
-            Uses cached data from scanner runs
 
 ENTRY     : Price > SMA10 > SMA20 > SMA50 > SMA150 > SMA200
-            Price within 20% of ATH / 1Y High / 5Y High
+            Price within X% of ATH / 1Y High / 5Y High
             Top 3 by momentum (single ROC period - editable)
 
-EXIT      : 8% stop loss | 20% profit target
+EXIT      : Stop loss | Profit target
 REBALANCE : Monthly (first trading day of each month)
 POSITIONS : 3 (equal weight)
 COSTS     : Full NSE equity delivery charges + slippage
-
 =============================================================================
 """
 
@@ -30,25 +26,24 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # =============================================================================
-# BACKTEST CONFIG
+# BACKTEST CONFIG - EDIT THESE VALUES
 # =============================================================================
 CACHE_DIR         = "cache_scanner"      # Use same cache as scanner
 INITIAL_CAPITAL   = 1_00_000             # Rs 1 lakh starting capital
 MAX_POSITIONS     = 3                     # Hold 3 stocks at a time
-STOP_LOSS_PCT     = 0.08                  # 8% stop loss
-TARGET_PCT        = 0.20                  # 20% profit target
-NEAR_HIGH_PCT     = 0.20                  # Within 20% of high
+STOP_LOSS_PCT     = 0.05                  # 5% stop loss
+TARGET_PCT        = 0.10                  # 10% profit target
+NEAR_HIGH_PCT     = 0.05                  # Within 5% of high
 MIN_PRICE         = 20                    # Minimum price filter
 MIN_AVG_TURNOVER  = 10_00_000             # Min daily turnover Rs 10 lakh
 FILTER_LOOKBACK   = 60                    # Days for quality filter
 MIN_DATA_DAYS     = 252                   # Need 1 year of data
 
-# Momentum settings - EDITABLE: Change ROC_PERIOD to use different momentum period
-# Options: 20, 60, 90, or any other period you want
-ROC_PERIOD = 60  # <-- EDIT THIS VALUE to change momentum period (days)
+# Momentum settings - EDITABLE
+ROC_PERIOD = 20  # <-- EDIT THIS VALUE (20, 60, 90, etc.)
 
 # Backtest period
-BACKTEST_START    = "2020-01-01"
+BACKTEST_START    = "2016-01-01"
 BACKTEST_END      = "2026-12-31"
 
 # Costs
@@ -58,7 +53,7 @@ SLIPPAGE_PCT      = 0.001                 # 0.1% slippage per side
 
 
 # =============================================================================
-# EXCLUSION PATTERNS FOR ETFs, LIQUID FUNDS, BONDS, INDICES, etc.
+# EXCLUSION PATTERNS FOR ETFs, LIQUID FUNDS, BONDS, INDICES
 # =============================================================================
 ETF_LIQUID_PATTERNS = [
     "ETF", "BEES", "LIQUID", "GOLD", "SILVER", "NIFTY", "BANK", "GILT",
@@ -66,30 +61,26 @@ ETF_LIQUID_PATTERNS = [
     "CONSUMPTION", "DIVIDEND", "GROWTH", "VALUE", "MOMENTUM", "QUALITY",
     "LOWVOL", "ALPHA", "EQUAL", "SHARIAH", "ESG", "HEALTHCARE", "IT",
     "PRIVATE", "SETF", "NETF", "IETF", "CASE", "ADD", "PLUS", "SHRI",
-    # Specific ETF/Liquid fund names
     "LIQUIDBETF", "LIQUIDCASE", "LIQUIDPLUS", "CASHIETF", "LIQUIDADD",
     "HDFCLIQUID", "LIQUIDSHRI", "GROWWLIQID", "LIQUID1", "AONELIQUID",
     "EBBETF", "GILT5YBEES", "GSEC10YEAR", "GSEC5IETF",
 ]
 
 def is_etf_or_liquid(symbol):
-    """Check if symbol is an ETF, liquid fund, index fund, or bond fund"""
     sym_upper = symbol.upper()
     for pattern in ETF_LIQUID_PATTERNS:
         if pattern in sym_upper:
             return True
     return False
-# =============================================================================
 
 
 # =============================================================================
 # TRANSACTION COSTS (NSE Delivery)
 # =============================================================================
 def calc_cost(trade_value, side):
-    """Calculate NSE delivery transaction costs"""
     if not APPLY_COSTS:
         return 0.0
-    brokerage = min(trade_value * 0.001, 20.0)  # 0.1% or Rs 20 max
+    brokerage = min(trade_value * 0.001, 20.0)
     exchange_charges = trade_value * 0.0000335
     sebi_charges = trade_value * 0.000001
     gst = (brokerage + exchange_charges) * 0.18
@@ -98,20 +89,51 @@ def calc_cost(trade_value, side):
 
 
 # =============================================================================
-# LOAD CACHED DATA (All stocks, excluding ETF/Liquid)
+# TECHNICAL INDICATORS
+# =============================================================================
+def compute_indicators(df):
+    if len(df) < MIN_DATA_DAYS:
+        return None
+
+    recent = df.tail(FILTER_LOOKBACK)
+    if recent["close"].mean() < MIN_PRICE:
+        return None
+    if "volume" in recent.columns:
+        avg_turnover = (recent["close"] * recent["volume"]).mean()
+        if avg_turnover < MIN_AVG_TURNOVER:
+            return None
+
+    df = df.copy()
+
+    df["sma10"] = df["close"].rolling(10).mean()
+    df["sma20"] = df["close"].rolling(20).mean()
+    df["sma50"] = df["close"].rolling(50).mean()
+    df["sma150"] = df["close"].rolling(150).mean()
+    df["sma200"] = df["close"].rolling(200).mean()
+
+    df["ath"] = df["close"].expanding().max()
+    df["high_1y"] = df["close"].rolling(252, min_periods=200).max()
+    df["high_5y"] = df["close"].rolling(252 * 5, min_periods=252).max()
+
+    df["momentum"] = df["close"].pct_change(ROC_PERIOD) * 100
+
+    df.dropna(subset=["sma200", "momentum"], inplace=True)
+
+    return df if len(df) > 0 else None
+
+
+# =============================================================================
+# LOAD CACHED DATA
 # =============================================================================
 def load_all_cached_data():
-    """Load all cached stock data, excluding ETFs/Liquid funds/Indices"""
     if not os.path.exists(CACHE_DIR):
         print(f"  ERROR: Cache directory '{CACHE_DIR}' not found!")
         print("  Please run the scanner first to download stock data.")
         raise SystemExit(1)
 
-    # Find all cached stock files
     stock_files = [f for f in os.listdir(CACHE_DIR) if f.endswith("_1D.pkl")]
     print(f"  Found {len(stock_files):,} total cached stock files")
 
-    # Filter out ETFs, liquid funds, indices
     filtered_files = []
     excluded_count = 0
     for f in stock_files:
@@ -142,12 +164,11 @@ def load_all_cached_data():
                 skipped += 1
                 continue
 
-            # Compute indicators
             df = compute_indicators(df)
             if df is not None and len(df) > 0:
                 price_data[symbol] = df
 
-        except Exception as e:
+        except:
             skipped += 1
             continue
 
@@ -158,49 +179,9 @@ def load_all_cached_data():
 
 
 # =============================================================================
-# TECHNICAL INDICATORS
-# =============================================================================
-def compute_indicators(df):
-    """Compute all SMAs, highs, and momentum indicators"""
-    if len(df) < MIN_DATA_DAYS:
-        return None
-
-    # Quality filter
-    recent = df.tail(FILTER_LOOKBACK)
-    if recent["close"].mean() < MIN_PRICE:
-        return None
-    if "volume" in recent.columns:
-        avg_turnover = (recent["close"] * recent["volume"]).mean()
-        if avg_turnover < MIN_AVG_TURNOVER:
-            return None
-
-    df = df.copy()
-
-    # SMAs
-    df["sma10"] = df["close"].rolling(10).mean()
-    df["sma20"] = df["close"].rolling(20).mean()
-    df["sma50"] = df["close"].rolling(50).mean()
-    df["sma150"] = df["close"].rolling(150).mean()
-    df["sma200"] = df["close"].rolling(200).mean()
-
-    # Highs
-    df["ath"] = df["close"].expanding().max()
-    df["high_1y"] = df["close"].rolling(252, min_periods=200).max()
-    df["high_5y"] = df["close"].rolling(252 * 5, min_periods=252).max()
-
-    # Single ROC period (configurable via ROC_PERIOD variable)
-    df["momentum"] = df["close"].pct_change(ROC_PERIOD) * 100
-
-    df.dropna(subset=["sma200", "momentum"], inplace=True)
-
-    return df if len(df) > 0 else None
-
-
-# =============================================================================
-# ENTRY FILTER (Same as scanner)
+# ENTRY FILTER
 # =============================================================================
 def passes_entry(row):
-    """Check if stock passes entry criteria"""
     price = row["close"]
     sma10 = row["sma10"]
     sma20 = row["sma20"]
@@ -208,11 +189,9 @@ def passes_entry(row):
     sma150 = row["sma150"]
     sma200 = row["sma200"]
 
-    # SMA alignment check
     if not (price > sma10 > sma20 > sma50 > sma150 > sma200):
         return False, None
 
-    # Near high check
     ath = row["ath"]
     high_1y = row["high_1y"]
     high_5y = row["high_5y"]
@@ -235,8 +214,6 @@ def passes_entry(row):
 # BACKTEST ENGINE
 # =============================================================================
 def run_backtest(price_data):
-    """Run the momentum backtest"""
-    # Get all trading dates
     all_dates = sorted(set().union(*[df.index for df in price_data.values()]))
     all_dates = [d for d in all_dates if BACKTEST_START <= str(d.date()) <= BACKTEST_END]
 
@@ -244,28 +221,24 @@ def run_backtest(price_data):
         print("  ERROR: No trading dates in backtest period!")
         return pd.DataFrame(), pd.DataFrame(), 0
 
-    # Identify month starts for rebalancing
     month_starts = set(
         pd.Series(all_dates, index=pd.DatetimeIndex(all_dates))
         .resample("MS").first().dropna().tolist()
     )
 
-    # Initialize
     cash = float(INITIAL_CAPITAL)
-    positions = {}  # {symbol: {entry_date, entry_price, shares, stop, target, buy_cost, high_type}}
+    positions = {}
     trades = []
     equity = []
     total_costs = 0.0
 
     def get_price(sym, date):
-        """Get last available price for symbol on or before date"""
         if sym not in price_data:
             return None
         sub = price_data[sym][price_data[sym].index <= date]
         return float(sub["close"].iloc[-1]) if not sub.empty else None
 
     def calc_nav(date):
-        """Calculate total portfolio value"""
         nav = cash
         for sym, pos in positions.items():
             px = get_price(sym, date)
@@ -279,6 +252,7 @@ def run_backtest(price_data):
     print(f"  Capital: Rs {INITIAL_CAPITAL:,.0f}")
     print(f"  Momentum: {ROC_PERIOD}-day ROC | Positions: {MAX_POSITIONS}")
     print(f"  Stop Loss: {STOP_LOSS_PCT*100:.0f}% | Target: {TARGET_PCT*100:.0f}%")
+    print(f"  Near High: {NEAR_HIGH_PCT*100:.0f}%")
     print(f"{'=' * 70}\n")
 
     total_days = len(all_dates)
@@ -290,9 +264,7 @@ def run_backtest(price_data):
             print(f"  {pct:3d}%  {str(date.date())}  Pos:{len(positions)}  Cash:Rs {cash:,.0f}  NAV:Rs {calc_nav(date):,.0f}    ", end="\r")
             last_pct = pct
 
-        # =====================================================================
-        # CHECK EXITS (Stop Loss / Target)
-        # =====================================================================
+        # CHECK EXITS
         for sym in list(positions.keys()):
             pos = positions[sym]
             px = get_price(sym, date)
@@ -301,15 +273,13 @@ def run_backtest(price_data):
 
             exit_reason = None
 
-            # Stop loss check (8%)
             if px <= pos["stop"]:
                 exit_reason = "STOP_LOSS"
-            # Target check (20%)
             elif px >= pos["target"]:
                 exit_reason = "TARGET_HIT"
 
             if exit_reason:
-                exit_price = px * (1 - SLIPPAGE_PCT)  # Sell slippage
+                exit_price = px * (1 - SLIPPAGE_PCT)
                 sell_value = exit_price * pos["shares"]
                 sell_cost = calc_cost(sell_value, "sell")
                 pnl_gross = (exit_price - pos["entry_price"]) * pos["shares"]
@@ -338,13 +308,10 @@ def run_backtest(price_data):
 
                 del positions[sym]
 
-        # =====================================================================
-        # CHECK ENTRIES (Monthly rebalancing)
-        # =====================================================================
+        # CHECK ENTRIES
         if date in month_starts:
             slots = MAX_POSITIONS - len(positions)
             if slots > 0:
-                # Find all candidates
                 candidates = []
                 for sym, df in price_data.items():
                     if sym in positions:
@@ -357,21 +324,18 @@ def run_backtest(price_data):
                     if passes:
                         candidates.append({
                             "symbol": sym,
-                            "momentum": float(row["momentum"]),  # Single ROC period
+                            "momentum": float(row["momentum"]),
                             "price": float(row["close"]),
                             "high_type": high_type,
                         })
 
-                # Sort by momentum (highest first)
                 candidates.sort(key=lambda x: x["momentum"], reverse=True)
-
-                # Take top N candidates
                 allocation = cash * 0.99 / slots if slots > 0 else 0
 
                 for cand in candidates[:slots]:
                     sym = cand["symbol"]
                     price = cand["price"]
-                    entry_price = price * (1 + SLIPPAGE_PCT)  # Buy slippage
+                    entry_price = price * (1 + SLIPPAGE_PCT)
 
                     shares = int(allocation / entry_price)
                     if shares < 1:
@@ -396,12 +360,9 @@ def run_backtest(price_data):
                         "high_type": cand["high_type"],
                     }
 
-        # Record daily equity
         equity.append({"date": date, "equity": calc_nav(date)})
 
-    # =========================================================================
     # CLOSE REMAINING POSITIONS
-    # =========================================================================
     last_date = all_dates[-1]
     for sym, pos in list(positions.items()):
         px = get_price(sym, last_date)
@@ -437,7 +398,6 @@ def run_backtest(price_data):
 
     print(f"\n  100% complete                                                      ")
 
-    # Create DataFrames
     trades_df = pd.DataFrame(trades)
     equity_df = pd.DataFrame(equity).set_index("date")
     equity_df["equity"] = equity_df["equity"].ffill()
@@ -449,7 +409,6 @@ def run_backtest(price_data):
 # PERFORMANCE REPORT
 # =============================================================================
 def report(trades_df, equity_df, total_costs):
-    """Generate performance report"""
     if trades_df.empty:
         print("\n  No trades executed.")
         return
@@ -459,19 +418,14 @@ def report(trades_df, equity_df, total_costs):
     years = (equity_df.index[-1] - equity_df.index[0]).days / 365.25
     cagr = ((final_equity / INITIAL_CAPITAL) ** (1 / years) - 1) * 100 if years > 0 else 0
 
-    # Drawdown
     rolling_max = equity_df["equity"].cummax()
     drawdown = (equity_df["equity"] - rolling_max) / rolling_max * 100
     max_dd = drawdown.min()
 
-    # Sharpe ratio
     daily_returns = equity_df["equity"].pct_change().dropna()
     sharpe = (daily_returns.mean() / daily_returns.std() * np.sqrt(252)) if daily_returns.std() > 0 else 0
-
-    # Calmar ratio
     calmar = abs(cagr / max_dd) if max_dd != 0 else 0
 
-    # Win/Loss stats
     wins = trades_df[trades_df["pnl_net"] > 0]
     losses = trades_df[trades_df["pnl_net"] <= 0]
     win_rate = len(wins) / len(trades_df) * 100 if len(trades_df) > 0 else 0
@@ -484,6 +438,7 @@ def report(trades_df, equity_df, total_costs):
     print(sep)
     print(f"  Period          : {equity_df.index[0].date()}  to  {equity_df.index[-1].date()}")
     print(f"  Momentum Period : {ROC_PERIOD}-day ROC")
+    print(f"  Near High       : {NEAR_HIGH_PCT*100:.0f}%")
     print(f"  Initial Capital : Rs {INITIAL_CAPITAL:>14,.0f}")
     print(f"  Final Equity    : Rs {final_equity:>14,.0f}")
     print(f"  Total Return    : {total_return:>12.2f}%")
@@ -503,13 +458,11 @@ def report(trades_df, equity_df, total_costs):
     print(f"  Avg Hold Days   : {avg_hold:>12.1f}")
     print("-" * 70)
 
-    # Exit reason breakdown
     print("\n  EXIT REASON BREAKDOWN:")
     for reason, cnt in trades_df["exit_reason"].value_counts().items():
         avg_pnl = trades_df[trades_df["exit_reason"] == reason]["pnl_pct"].mean()
         print(f"    {reason:<20}: {cnt:4d} trades  avg {avg_pnl:>+6.1f}%")
 
-    # High type breakdown
     print("\n  ENTRY HIGH TYPE BREAKDOWN:")
     for ht, cnt in trades_df["high_type"].value_counts().items():
         avg_pnl = trades_df[trades_df["high_type"] == ht]["pnl_pct"].mean()
@@ -517,14 +470,12 @@ def report(trades_df, equity_df, total_costs):
 
     print(sep)
 
-    # Top trades
     cols = ["symbol", "entry_date", "exit_date", "entry_price", "exit_price", "pnl_pct", "exit_reason"]
     print("\n  TOP 10 WINNING TRADES:")
     print(trades_df.nlargest(10, "pnl_net")[cols].to_string(index=False))
     print("\n  TOP 10 LOSING TRADES:")
     print(trades_df.nsmallest(10, "pnl_net")[cols].to_string(index=False))
 
-    # Monthly equity
     eq_monthly = equity_df["equity"].resample("ME").last().dropna()
     print(f"\n  {'Date':<12}  {'Equity':>14}  {'MoM%':>7}  Chart")
     print("  " + "-" * 58)
@@ -535,7 +486,6 @@ def report(trades_df, equity_df, total_costs):
         print(f"  {str(dt.date()):<12}  Rs {val:>12,.0f}  {ret:>+6.1f}%  {bar}")
         prev = val
 
-    # Export
     trades_df.to_csv("backtest_trades.csv", index=False)
     equity_df.to_csv("backtest_equity.csv")
 
@@ -554,11 +504,11 @@ def main():
     print("\n" + "=" * 70)
     print("  NSE MOMENTUM BACKTEST - ALL STOCKS (NO ETF/LIQUID/INDEX)")
     print("  Strategy: SMA alignment + Near High + Momentum")
-    print(f"  Momentum Period: {ROC_PERIOD}-day ROC  (edit ROC_PERIOD to change)")
+    print(f"  Momentum: {ROC_PERIOD}-day ROC  (edit ROC_PERIOD to change)")
     print(f"  Stop Loss: {STOP_LOSS_PCT*100:.0f}%  |  Target: {TARGET_PCT*100:.0f}%  |  Positions: {MAX_POSITIONS}")
+    print(f"  Near High: {NEAR_HIGH_PCT*100:.0f}%")
     print("=" * 70)
 
-    # Load cached data (all stocks, excluding ETF/Liquid)
     print("\nLoading stock data from cache (excluding ETF/Liquid/Index)...")
     price_data = load_all_cached_data()
 
@@ -566,10 +516,7 @@ def main():
         print("\n  ERROR: No stock data found. Run the scanner first!")
         raise SystemExit(1)
 
-    # Run backtest
     trades_df, equity_df, total_costs = run_backtest(price_data)
-
-    # Generate report
     report(trades_df, equity_df, total_costs)
 
 
