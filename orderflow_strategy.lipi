@@ -20,7 +20,7 @@ isTypeA = orderflow.mindelta < -deltaThreshold
 isTypeB = orderflow.maxdelta > deltaThreshold
 
 // CUMULATIVE DELTA
-var float cvd = 0.0
+var cvd = 0.0
 cvd := cvd + orderflow.delta
 netLong = cvd > 0
 netShort = cvd < 0
@@ -35,10 +35,10 @@ overlap = math.max(0, overlapHigh - overlapLow)
 overlapPct = prevRange > 0 ? (overlap / prevRange) * 100 : 0
 isInRange = overlapPct >= rangeOverlapPct
 
-var float rHigh = 0.0
-var float rLow = 0.0
-var float rFirstVol = 0.0
-var bool inRange = false
+var rHigh = 0.0
+var rLow = 0.0
+var rFirstVol = 0.0
+var inRange = false
 
 if isInRange and not inRange {
     rHigh := math.max(high, prevHigh)
