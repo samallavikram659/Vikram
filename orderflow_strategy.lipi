@@ -62,12 +62,12 @@ failLong = low < rLow[1] and close > rLow[1] and netLong and isTypeB
 failShort = high > rHigh[1] and close < rHigh[1] and netShort and isTypeA
 
 // PLOT SIGNALS
-plotshape(bullInit, title="Bull Init", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.normal, text="INIT")
-plotshape(bearInit, title="Bear Init", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.normal, text="INIT")
-plotshape(absLong, title="Abs Long", location=location.belowbar, color=color.lime, style=shape.arrowup, size=size.small, text="ABS")
-plotshape(absShort, title="Abs Short", location=location.abovebar, color=color.maroon, style=shape.arrowdown, size=size.small, text="ABS")
-plotshape(failLong, title="Fail Long", location=location.belowbar, color=color.aqua, style=shape.diamond, size=size.small, text="FAIL")
-plotshape(failShort, title="Fail Short", location=location.abovebar, color=color.orange, style=shape.diamond, size=size.small, text="FAIL")
+plotshape(bullInit, title="Bull Init", location=location.belowbar, color=color.green, shape=shape.triangleup, size=size.normal, text="INIT")
+plotshape(bearInit, title="Bear Init", location=location.abovebar, color=color.red, shape=shape.triangledown, size=size.normal, text="INIT")
+plotshape(absLong, title="Abs Long", location=location.belowbar, color=color.lime, shape=shape.arrowup, size=size.small, text="ABS")
+plotshape(absShort, title="Abs Short", location=location.abovebar, color=color.maroon, shape=shape.arrowdown, size=size.small, text="ABS")
+plotshape(failLong, title="Fail Long", location=location.belowbar, color=color.aqua, shape=shape.diamond, size=size.small, text="FAIL")
+plotshape(failShort, title="Fail Short", location=location.abovebar, color=color.orange, shape=shape.diamond, size=size.small, text="FAIL")
 
 // PLOT RANGE
 plot(rHigh, title="Range High", color=color.blue, linewidth=1)
