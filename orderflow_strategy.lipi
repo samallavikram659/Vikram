@@ -4,9 +4,10 @@ indicator("Order Flow Strategy", shorttitle="OF_Strategy", overlay=true)
 // INPUTS
 largeCandleMultiplier = input(1.5, title="Large Candle ATR Multiplier")
 atrLength = input(14, title="ATR Length")
-volumeDropPct = input(50, title="Volume Drop % for Absorption")
+volumeAvgLen = input(10, title="Volume Avg Length")
 rangeOverlapPct = input(70, title="Range Overlap %")
 deltaThreshold = input(500, title="Strong Delta Threshold")
+cvdLength = input(20, title="CVD Lookback Bars")
 
 // CANDLE ANALYSIS
 candleRange = high - low
@@ -15,17 +16,20 @@ isLargeCandle = candleRange > (atr * largeCandleMultiplier)
 isBullishCandle = close > open
 isBearishCandle = close < open
 
-// DELTA TYPE
+// DELTA TYPE (Type A = seller absorption, Type B = buyer absorption)
 isTypeA = orderflow.mindelta < -deltaThreshold
 isTypeB = orderflow.maxdelta > deltaThreshold
 
-// CUMULATIVE DELTA
-var cvd = 0.0
-cvd := cvd + orderflow.delta
+// CUMULATIVE DELTA (rolling sum as proxy for CVD)
+cvd = talib.sum(orderflow.delta, cvdLength)
 netLong = cvd > 0
 netShort = cvd < 0
 
-// RANGE TRACKING
+// VOLUME ANALYSIS
+avgVolume = talib.sma(volume, volumeAvgLen)
+lowVolume = volume < (avgVolume * 0.5)
+
+// RANGE DETECTION (70% overlap between current and previous bar)
 prevHigh = high[1]
 prevLow = low[1]
 prevRange = prevHigh - prevLow
@@ -35,42 +39,29 @@ overlap = math.max(0, overlapHigh - overlapLow)
 overlapPct = prevRange > 0 ? (overlap / prevRange) * 100 : 0
 isInRange = overlapPct >= rangeOverlapPct
 
-var rHigh = 0.0
-var rLow = 0.0
-var rFirstVol = 0.0
-var inRange = false
+// ABSORPTION ZONE: overlapping bars + low volume
+isAbsZone = isInRange and lowVolume
 
-if isInRange and not inRange {
-    rHigh := math.max(high, prevHigh)
-    rLow := math.min(low, prevLow)
-    rFirstVol := volume[1]
-    inRange := true
-}
-
-if inRange and isInRange {
-    rHigh := math.max(rHigh, high)
-    rLow := math.min(rLow, low)
-}
-
-if inRange and not isInRange {
-    inRange := false
-}
-
-isAbsZone = inRange and volume < (rFirstVol * 0.5)
+// RANGE HIGH/LOW (use recent swing over last 5 bars)
+rHigh = talib.highest(high, 5)
+rLow = talib.lowest(low, 5)
 
 // STRATEGY 1: INITIATIVE DRIVE
+// Large candle in direction + absorption delta + net CVD confirms
 bullInit = isLargeCandle and isBullishCandle and (isTypeA or isTypeB) and netLong
 bearInit = isLargeCandle and isBearishCandle and (isTypeA or isTypeB) and netShort
 
 // STRATEGY 2: ABSORPTION BREAKOUT
+// Previous bar was absorption zone, current bar breaks out
 absLong = isAbsZone[1] and close > rHigh[1] and netLong
 absShort = isAbsZone[1] and close < rLow[1] and netShort
 
 // STRATEGY 3: FAILED BREAKOUT
+// Price spikes below/above range but closes back inside
 failLong = low < rLow[1] and close > rLow[1] and netLong and isTypeB
 failShort = high > rHigh[1] and close < rHigh[1] and netShort and isTypeA
 
-// PLOTS
+// PLOT SIGNALS
 plotshape(bullInit, title="Bull Init", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.normal, text="INIT")
 plotshape(bearInit, title="Bear Init", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.normal, text="INIT")
 plotshape(absLong, title="Abs Long", location=location.belowbar, color=color.lime, style=shape.arrowup, size=size.small, text="ABS")
@@ -78,10 +69,12 @@ plotshape(absShort, title="Abs Short", location=location.abovebar, color=color.m
 plotshape(failLong, title="Fail Long", location=location.belowbar, color=color.aqua, style=shape.diamond, size=size.small, text="FAIL")
 plotshape(failShort, title="Fail Short", location=location.abovebar, color=color.orange, style=shape.diamond, size=size.small, text="FAIL")
 
-plot(inRange ? rHigh : na, title="Range High", color=color.blue, linewidth=2)
-plot(inRange ? rLow : na, title="Range Low", color=color.blue, linewidth=2)
+// PLOT RANGE
+plot(rHigh, title="Range High", color=color.blue, linewidth=1)
+plot(rLow, title="Range Low", color=color.blue, linewidth=1)
 bgcolor(isAbsZone ? color.new(color.yellow, 90) : na, title="Absorption Zone")
 
+// ALERTS
 alertcondition(bullInit, title="Bull Initiative", message="Bullish Initiative Drive!")
 alertcondition(bearInit, title="Bear Initiative", message="Bearish Initiative Drive!")
 alertcondition(absLong, title="Abs Long", message="Absorption Breakout Long!")
