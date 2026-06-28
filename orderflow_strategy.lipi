@@ -1,104 +1,90 @@
 //@version=1
-// ORDER FLOW TRADING STRATEGY - GOCHARTING LIPI
-// Strategy 1: Initiative Drive (Momentum)
-// Strategy 2: Absorption Range Breakout
-// Strategy 3: Failed Breakout
+indicator("Order Flow Strategy", shorttitle="OF_Strategy", overlay=true)
 
-indicator("Order Flow Strategy", shorttitle="OF_Strategy", overlay=true) {
+// INPUTS
+largeCandleMultiplier = input(1.5, title="Large Candle ATR Multiplier")
+atrLength = input(14, title="ATR Length")
+volumeDropPct = input(50, title="Volume Drop % for Absorption")
+rangeOverlapPct = input(70, title="Range Overlap %")
+deltaThreshold = input(500, title="Strong Delta Threshold")
 
-    // INPUTS
-    blockSize = input(25, title="Block Size (Nifty=25)")
-    largeCandleMultiplier = input(1.5, title="Large Candle ATR Multiplier")
-    atrLength = input(14, title="ATR Length")
-    volumeDropPct = input(50, title="Volume Drop % for Absorption")
-    rangeOverlapPct = input(70, title="Range Overlap %")
-    deltaThreshold = input(500, title="Strong Delta Threshold")
+// CANDLE ANALYSIS
+candleRange = high - low
+atr = talib.sma(candleRange, atrLength)
+isLargeCandle = candleRange > (atr * largeCandleMultiplier)
+isBullishCandle = close > open
+isBearishCandle = close < open
 
-    // CUMULATIVE DELTA FROM SESSION START (9:15)
-    var float cumulativeDelta = 0.0
-    isSessionStart = hour == 9 and minute == 15
-    if isSessionStart {
-        cumulativeDelta := 0.0
-    }
-    cumulativeDelta := cumulativeDelta + orderflow.delta
-    netDeltaPositive = cumulativeDelta > 0
-    netDeltaNegative = cumulativeDelta < 0
+// DELTA TYPE
+isTypeA = orderflow.mindelta < -deltaThreshold
+isTypeB = orderflow.maxdelta > deltaThreshold
 
-    // CANDLE ANALYSIS
-    candleRange = high - low
-    atr = talib.sma(candleRange, atrLength)
-    isLargeCandle = candleRange > (atr * largeCandleMultiplier)
-    isBullishCandle = close > open
-    isBearishCandle = close < open
+// CUMULATIVE DELTA
+var float cvd = 0.0
+cvd := cvd + orderflow.delta
+netLong = cvd > 0
+netShort = cvd < 0
 
-    // DELTA TYPE ANALYSIS
-    isTypeA = orderflow.mindelta < -deltaThreshold
-    isTypeB = orderflow.maxdelta > deltaThreshold
+// RANGE TRACKING
+prevHigh = high[1]
+prevLow = low[1]
+prevRange = prevHigh - prevLow
+overlapHigh = math.min(high, prevHigh)
+overlapLow = math.max(low, prevLow)
+overlap = math.max(0, overlapHigh - overlapLow)
+overlapPct = prevRange > 0 ? (overlap / prevRange) * 100 : 0
+isInRange = overlapPct >= rangeOverlapPct
 
-    // RANGE DETECTION (70% overlap)
-    prevHigh = high[1]
-    prevLow = low[1]
-    prevRange = prevHigh - prevLow
-    overlapHigh = math.min(high, prevHigh)
-    overlapLow = math.max(low, prevLow)
-    overlap = math.max(0, overlapHigh - overlapLow)
-    overlapPct = prevRange > 0 ? (overlap / prevRange) * 100 : 0
-    isInRange = overlapPct >= rangeOverlapPct
+var float rHigh = 0.0
+var float rLow = 0.0
+var float rFirstVol = 0.0
+var bool inRange = false
 
-    var float rangeHigh = 0.0
-    var float rangeLow = 0.0
-    var float rangeFirstVolume = 0.0
-    var bool inAbsorptionRange = false
-
-    if isInRange and not inAbsorptionRange {
-        rangeHigh := math.max(high, prevHigh)
-        rangeLow := math.min(low, prevLow)
-        rangeFirstVolume := volume[1]
-        inAbsorptionRange := true
-    }
-    if inAbsorptionRange and isInRange {
-        rangeHigh := math.max(rangeHigh, high)
-        rangeLow := math.min(rangeLow, low)
-    }
-    if inAbsorptionRange and not isInRange {
-        inAbsorptionRange := false
-    }
-
-    isAbsorptionZone = inAbsorptionRange and volume < (rangeFirstVolume * 0.5)
-
-    // STRATEGY 1: INITIATIVE DRIVE
-    bullishInitiative = isLargeCandle and isBullishCandle and (isTypeA or isTypeB) and netDeltaPositive
-    bearishInitiative = isLargeCandle and isBearishCandle and (isTypeA or isTypeB) and netDeltaNegative
-
-    // STRATEGY 2: ABSORPTION RANGE BREAKOUT
-    absorptionBreakoutLong = isAbsorptionZone[1] and close > rangeHigh[1] and netDeltaPositive
-    absorptionBreakoutShort = isAbsorptionZone[1] and close < rangeLow[1] and netDeltaNegative
-
-    // STRATEGY 3: FAILED BREAKOUT
-    brokeBelow = low < rangeLow[1] and close > rangeLow[1]
-    failedBreakoutLong = brokeBelow and netDeltaPositive and isTypeB
-    brokeAbove = high > rangeHigh[1] and close < rangeHigh[1]
-    failedBreakoutShort = brokeAbove and netDeltaNegative and isTypeA
-
-    // PLOT SIGNALS
-    plotshape(bullishInitiative, title="Bull Initiative", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.normal, text="INIT")
-    plotshape(bearishInitiative, title="Bear Initiative", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.normal, text="INIT")
-    plotshape(absorptionBreakoutLong, title="Absorption Long", location=location.belowbar, color=color.lime, style=shape.arrowup, size=size.small, text="ABS")
-    plotshape(absorptionBreakoutShort, title="Absorption Short", location=location.abovebar, color=color.maroon, style=shape.arrowdown, size=size.small, text="ABS")
-    plotshape(failedBreakoutLong, title="Failed BO Long", location=location.belowbar, color=color.aqua, style=shape.diamond, size=size.small, text="FAIL")
-    plotshape(failedBreakoutShort, title="Failed BO Short", location=location.abovebar, color=color.orange, style=shape.diamond, size=size.small, text="FAIL")
-
-    // PLOT RANGE
-    plot(inAbsorptionRange ? rangeHigh : na, title="Range High", color=color.blue, linewidth=2)
-    plot(inAbsorptionRange ? rangeLow : na, title="Range Low", color=color.blue, linewidth=2)
-    bgcolor(isAbsorptionZone ? color.new(color.yellow, 90) : na, title="Absorption Zone")
-
-    // ALERTS
-    alertcondition(bullishInitiative, title="Bullish Initiative", message="Bullish Initiative Drive Signal!")
-    alertcondition(bearishInitiative, title="Bearish Initiative", message="Bearish Initiative Drive Signal!")
-    alertcondition(absorptionBreakoutLong, title="Absorption Long", message="Absorption Breakout Long!")
-    alertcondition(absorptionBreakoutShort, title="Absorption Short", message="Absorption Breakout Short!")
-    alertcondition(failedBreakoutLong, title="Failed BO Long", message="Failed Breakout Long!")
-    alertcondition(failedBreakoutShort, title="Failed BO Short", message="Failed Breakout Short!")
-
+if isInRange and not inRange {
+    rHigh := math.max(high, prevHigh)
+    rLow := math.min(low, prevLow)
+    rFirstVol := volume[1]
+    inRange := true
 }
+
+if inRange and isInRange {
+    rHigh := math.max(rHigh, high)
+    rLow := math.min(rLow, low)
+}
+
+if inRange and not isInRange {
+    inRange := false
+}
+
+isAbsZone = inRange and volume < (rFirstVol * 0.5)
+
+// STRATEGY 1: INITIATIVE DRIVE
+bullInit = isLargeCandle and isBullishCandle and (isTypeA or isTypeB) and netLong
+bearInit = isLargeCandle and isBearishCandle and (isTypeA or isTypeB) and netShort
+
+// STRATEGY 2: ABSORPTION BREAKOUT
+absLong = isAbsZone[1] and close > rHigh[1] and netLong
+absShort = isAbsZone[1] and close < rLow[1] and netShort
+
+// STRATEGY 3: FAILED BREAKOUT
+failLong = low < rLow[1] and close > rLow[1] and netLong and isTypeB
+failShort = high > rHigh[1] and close < rHigh[1] and netShort and isTypeA
+
+// PLOTS
+plotshape(bullInit, title="Bull Init", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.normal, text="INIT")
+plotshape(bearInit, title="Bear Init", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.normal, text="INIT")
+plotshape(absLong, title="Abs Long", location=location.belowbar, color=color.lime, style=shape.arrowup, size=size.small, text="ABS")
+plotshape(absShort, title="Abs Short", location=location.abovebar, color=color.maroon, style=shape.arrowdown, size=size.small, text="ABS")
+plotshape(failLong, title="Fail Long", location=location.belowbar, color=color.aqua, style=shape.diamond, size=size.small, text="FAIL")
+plotshape(failShort, title="Fail Short", location=location.abovebar, color=color.orange, style=shape.diamond, size=size.small, text="FAIL")
+
+plot(inRange ? rHigh : na, title="Range High", color=color.blue, linewidth=2)
+plot(inRange ? rLow : na, title="Range Low", color=color.blue, linewidth=2)
+bgcolor(isAbsZone ? color.new(color.yellow, 90) : na, title="Absorption Zone")
+
+alertcondition(bullInit, title="Bull Initiative", message="Bullish Initiative Drive!")
+alertcondition(bearInit, title="Bear Initiative", message="Bearish Initiative Drive!")
+alertcondition(absLong, title="Abs Long", message="Absorption Breakout Long!")
+alertcondition(absShort, title="Abs Short", message="Absorption Breakout Short!")
+alertcondition(failLong, title="Fail Long", message="Failed Breakout Long!")
+alertcondition(failShort, title="Fail Short", message="Failed Breakout Short!")
