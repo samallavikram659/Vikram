@@ -69,9 +69,9 @@ plotshape(absShort, title="Abs Short", location=location.abovebar, color=color.m
 plotshape(failLong, title="Fail Long", location=location.belowbar, color=color.aqua, shape=shape.diamond, size=size.small, text="FAIL")
 plotshape(failShort, title="Fail Short", location=location.abovebar, color=color.orange, shape=shape.diamond, size=size.small, text="FAIL")
 
-// PLOT RANGE
-plot(rHigh, title="Range High", color=color.blue, linewidth=1)
-plot(rLow, title="Range Low", color=color.blue, linewidth=1)
+// PLOT RANGE (only show during absorption zones)
+plot(isAbsZone ? rHigh : na, title="Range High", color=color.blue, linewidth=2)
+plot(isAbsZone ? rLow : na, title="Range Low", color=color.blue, linewidth=2)
 bgcolor(isAbsZone ? color.new(color.yellow, 90) : na, title="Absorption Zone")
 
 // ALERTS
