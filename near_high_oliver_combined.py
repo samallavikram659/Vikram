@@ -1228,11 +1228,11 @@ def run_backtest(
 # ENTRY POINT
 # =============================================================================
 if __name__ == "__main__":
-    # Default: Nifty 500 stocks only (faster, focused on quality universe)
-    run_backtest(use_all_nse=False, tickers=NIFTY_500)
+    # Default: all NSE EQ stocks (~2500)
+    run_backtest(use_all_nse=True, max_stocks=None)
 
-    # Example: all NSE EQ stocks (~2500)
-    # run_backtest(use_all_nse=True, max_stocks=None)
+    # Example: Nifty 500 stocks only (faster, focused on quality universe)
+    # run_backtest(use_all_nse=False, tickers=NIFTY_500)
 
     # Example: specific tickers only
     # run_backtest(use_all_nse=False, tickers=["RELIANCE", "TCS", "INFY", "HDFCBANK"])
