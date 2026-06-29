@@ -1,9 +1,13 @@
 """
 =============================================================================
-NEAR HIGH BACKTEST - STANDALONE (NO OLIVER KELL)
+NEAR HIGH BACKTEST - PORTFOLIO-BASED
 =============================================================================
 UNIVERSE  : All NSE EQ-series stocks (~2500 from Angel One scrip master)
             Excludes: ETFs, Liquid Funds, Bonds, Index Funds
+
+PORTFOLIO : INITIAL_CAPITAL = Rs 1,00,000
+            MAX_POSITIONS   = 3 (equal allocation ~33,333 each)
+            Capital recycled on exit
 
 ENTRY     : EMA alignment (Close > EMA5 > EMA10 > EMA20 > EMA50 > EMA150 > EMA200)
             Close within 5-10% BELOW the key high (1Y / 5Y / ATH)
@@ -13,6 +17,11 @@ EXIT      : Stop loss 5% below entry price  OR  Target 10% above ref high
             Whichever is triggered first (checked bar-by-bar on Low / High)
 
 SIGNAL    : 'NearHigh_1Y', 'NearHigh_5Y', 'NearHigh_ATH'
+
+SIMULATION: Day-by-day across all stocks simultaneously
+            - Exit checks first, then entry scans
+            - If multiple entry signals on same day, pick highest momentum
+              (closest to its reference high)
 
 RESULTS   : CSV saved with timestamp; full performance report printed
 =============================================================================
@@ -41,18 +50,20 @@ ANGEL_CLIENT_ID      = "S63068620"
 ANGEL_CLIENT_PIN     = "4098"
 ANGEL_TOTP_SECRET    = "KVTELUFGR33YCPQUKO3ZSL4NMA"
 
-INITIAL_CAPITAL      = 1_000_000          # Rs 10 lakh
-POSITION_SIZE_PCT    = 0.15               # 15% per trade
-STOP_LOSS_PCT        = 0.05               # 5% stop loss
-TARGET_ABOVE_HIGH_PCT = 0.10              # 10% above ref high
-NEAR_HIGH_LOWER      = 0.90              # 10% below high (lower bound)
-NEAR_HIGH_UPPER      = 0.95              # 5% below high (upper bound)
-LOOKBACK_DAYS        = 365               # backtest window in days
-FETCH_YEARS          = 6                 # years of history to fetch
-NIFTY_TOKEN          = "99926000"        # Nifty 50 token on NSE
+INITIAL_CAPITAL      = 100_000              # Rs 1 lakh
+MAX_POSITIONS        = 3                    # max concurrent positions
+STOP_LOSS_PCT        = 0.05                 # 5% stop loss
+TARGET_ABOVE_HIGH_PCT = 0.10               # 10% above ref high
+NEAR_HIGH_LOWER      = 0.90                # 10% below high (lower bound)
+NEAR_HIGH_UPPER      = 0.95                # 5% below high (upper bound)
+LOOKBACK_DAYS        = 365                 # backtest window in days
+FETCH_YEARS          = 6                   # years of history to fetch
+NIFTY_TOKEN          = "99926000"          # Nifty 50 token on NSE
 
 CACHE_DIR            = "cache_near_high"
-MIN_DATA_DAYS        = 252               # minimum bars needed
+MIN_DATA_DAYS        = 252                 # minimum bars needed
+
+PER_POSITION_CAPITAL = INITIAL_CAPITAL / MAX_POSITIONS  # ~33,333 per slot
 
 # =============================================================================
 # ETF / FUND EXCLUSION PATTERNS
@@ -284,124 +295,247 @@ def signal_type_label(ref_high_type: str) -> str:
     return f"NearHigh_{ref_high_type}"
 
 # =============================================================================
-# SINGLE-STOCK BACKTEST
+# PORTFOLIO BACKTEST (DAY-BY-DAY ACROSS ALL STOCKS)
 # =============================================================================
-def backtest_stock(symbol: str, df: pd.DataFrame) -> list[dict]:
-    """Run bar-by-bar simulation for a single stock. Returns list of trade dicts."""
-    trades = []
+def portfolio_backtest(stock_data: dict[str, pd.DataFrame]) -> tuple[list[dict], list[dict]]:
+    """
+    Run a portfolio-level day-by-day simulation across all stocks.
 
+    Parameters
+    ----------
+    stock_data : dict mapping symbol -> DataFrame with indicators computed
+
+    Returns
+    -------
+    trades : list of completed trade dicts
+    equity_history : list of {date, equity, open_positions, invested, cash} dicts
+    """
     today = datetime.date.today()
     bt_start = today - datetime.timedelta(days=LOOKBACK_DAYS)
-    bt_df = df[df.index.date >= bt_start].copy()
-    if bt_df.empty:
-        return trades
 
-    in_trade    = False
-    entry_price = 0.0
-    stop_price  = 0.0
-    target_price = 0.0
-    ref_high    = 0.0
-    ref_high_type = ""
-    entry_date  = None
-    entry_idx   = 0
-    bars_held   = 0
+    # -------------------------------------------------------------------------
+    # Build a combined set of all trading dates within the backtest window
+    # -------------------------------------------------------------------------
+    all_dates = set()
+    stock_bt_data = {}  # symbol -> DataFrame filtered to backtest period
 
-    rows = bt_df.reset_index()    # columns: datetime, open, high, low, close, ...
+    for symbol, df in stock_data.items():
+        bt_df = df[df.index.date >= bt_start].copy()
+        if bt_df.empty:
+            continue
+        stock_bt_data[symbol] = bt_df
+        all_dates.update(bt_df.index.date)
 
-    for i, row in rows.iterrows():
-        if in_trade:
-            bars_held += 1
+    if not all_dates:
+        return [], []
+
+    trading_dates = sorted(all_dates)
+
+    # -------------------------------------------------------------------------
+    # Portfolio state
+    # -------------------------------------------------------------------------
+    cash = float(INITIAL_CAPITAL)
+    open_positions = {}  # symbol -> position dict
+    completed_trades = []
+    equity_history = []
+    max_concurrent = 0
+
+    # For quick row lookup: pre-build {symbol -> {date -> row_dict}}
+    symbol_date_rows = {}
+    for symbol, bt_df in stock_bt_data.items():
+        rows_by_date = {}
+        for idx, row in bt_df.iterrows():
+            rows_by_date[idx.date()] = row
+        symbol_date_rows[symbol] = rows_by_date
+
+    # -------------------------------------------------------------------------
+    # Day-by-day simulation
+    # -------------------------------------------------------------------------
+    for day in trading_dates:
+
+        # === STEP 1: CHECK EXITS ON ALL OPEN POSITIONS ===
+        symbols_to_close = []
+        for symbol, pos in open_positions.items():
+            if symbol not in symbol_date_rows:
+                continue
+            row = symbol_date_rows[symbol].get(day)
+            if row is None:
+                continue  # stock not traded on this day
+
+            pos["bars_held"] += 1
             exit_reason = None
-            exit_price  = 0.0
+            exit_price = 0.0
 
             # Check stop first (on Low), then target (on High)
-            if row["low"] <= stop_price:
-                exit_price  = stop_price
+            if row["low"] <= pos["stop_price"]:
+                exit_price = pos["stop_price"]
                 exit_reason = "Stop_Loss"
-            elif row["high"] >= target_price:
-                exit_price  = target_price
+            elif row["high"] >= pos["target_price"]:
+                exit_price = pos["target_price"]
                 exit_reason = "Target_Hit"
 
             if exit_reason:
-                shares  = int(INITIAL_CAPITAL * POSITION_SIZE_PCT / entry_price)
-                pnl_rs  = (exit_price - entry_price) * shares
-                pnl_pct = (exit_price - entry_price) / entry_price * 100
+                pnl_rs = (exit_price - pos["entry_price"]) * pos["shares"]
+                pnl_pct = (exit_price - pos["entry_price"]) / pos["entry_price"] * 100
+                proceeds = exit_price * pos["shares"]
+                cash += proceeds
 
-                trades.append({
+                completed_trades.append({
                     "Symbol":         symbol,
-                    "Entry_Date":     entry_date,
-                    "Exit_Date":      row["datetime"],
-                    "Signal_Type":    signal_type_label(ref_high_type),
-                    "Entry_Price":    round(entry_price, 2),
+                    "Entry_Date":     pos["entry_date"],
+                    "Exit_Date":      pd.Timestamp(day),
+                    "Signal_Type":    signal_type_label(pos["ref_high_type"]),
+                    "Entry_Price":    round(pos["entry_price"], 2),
                     "Exit_Price":     round(exit_price, 2),
-                    "Ref_High":       round(ref_high, 2),
-                    "Ref_High_Type":  ref_high_type,
-                    "Target_Price":   round(target_price, 2),
-                    "Stop_Price":     round(stop_price, 2),
-                    "Shares":         shares,
+                    "Ref_High":       round(pos["ref_high"], 2),
+                    "Ref_High_Type":  pos["ref_high_type"],
+                    "Target_Price":   round(pos["target_price"], 2),
+                    "Stop_Price":     round(pos["stop_price"], 2),
+                    "Shares":         pos["shares"],
                     "PnL_Rs":         round(pnl_rs, 2),
                     "PnL_Pct":        round(pnl_pct, 2),
-                    "Hold_Days":      bars_held,
+                    "Hold_Days":      pos["bars_held"],
                     "Exit_Reason":    exit_reason,
-                    "Entry_Month":    entry_date.strftime("%Y-%m"),
+                    "Entry_Month":    pos["entry_date"].strftime("%Y-%m"),
+                    "Allocation":     round(pos["allocation"], 2),
                 })
-                in_trade = False
-                bars_held = 0
+                symbols_to_close.append(symbol)
 
-        else:
-            # Look for entry signal on this bar
-            if not row["Signal"]:
-                continue
+        for sym in symbols_to_close:
+            del open_positions[sym]
 
-            rh, rh_type = get_ref_high(row)
-            if pd.isna(rh) or rh <= 0:
-                continue
+        # === STEP 2: SCAN FOR NEW ENTRIES (if slots available) ===
+        available_slots = MAX_POSITIONS - len(open_positions)
+        if available_slots > 0:
+            candidates = []
+            for symbol, date_rows in symbol_date_rows.items():
+                if symbol in open_positions:
+                    continue  # already holding this stock
+                row = date_rows.get(day)
+                if row is None:
+                    continue
+                if not row["Signal"]:
+                    continue
 
-            ep = float(row["close"])
-            sp = round(ep * (1 - STOP_LOSS_PCT), 2)
-            tp = round(rh * (1 + TARGET_ABOVE_HIGH_PCT), 2)
+                rh, rh_type = get_ref_high(row)
+                if pd.isna(rh) or rh <= 0:
+                    continue
 
-            in_trade      = True
-            entry_price   = ep
-            stop_price    = sp
-            target_price  = tp
-            ref_high      = rh
-            ref_high_type = rh_type
-            entry_date    = row["datetime"]
-            bars_held     = 0
+                close_price = float(row["close"])
+                # Momentum score: how close is close to ref high (higher = closer)
+                momentum = close_price / rh  # ranges from NEAR_HIGH_LOWER to NEAR_HIGH_UPPER
+                candidates.append({
+                    "symbol": symbol,
+                    "close": close_price,
+                    "ref_high": rh,
+                    "ref_high_type": rh_type,
+                    "momentum": momentum,
+                    "row": row,
+                })
 
-    # Close open trade at end of data
-    if in_trade and len(rows) > 0:
-        last = rows.iloc[-1]
-        ep_exit = float(last["close"])
-        shares  = int(INITIAL_CAPITAL * POSITION_SIZE_PCT / entry_price)
-        pnl_rs  = (ep_exit - entry_price) * shares
-        pnl_pct = (ep_exit - entry_price) / entry_price * 100
-        trades.append({
-            "Symbol":         symbol,
-            "Entry_Date":     entry_date,
-            "Exit_Date":      last["datetime"],
-            "Signal_Type":    signal_type_label(ref_high_type),
-            "Entry_Price":    round(entry_price, 2),
-            "Exit_Price":     round(ep_exit, 2),
-            "Ref_High":       round(ref_high, 2),
-            "Ref_High_Type":  ref_high_type,
-            "Target_Price":   round(target_price, 2),
-            "Stop_Price":     round(stop_price, 2),
-            "Shares":         shares,
-            "PnL_Rs":         round(pnl_rs, 2),
-            "PnL_Pct":        round(pnl_pct, 2),
-            "Hold_Days":      bars_held,
-            "Exit_Reason":    "End_Of_Data",
-            "Entry_Month":    entry_date.strftime("%Y-%m"),
+            # Sort by highest momentum (closest to ref high)
+            candidates.sort(key=lambda x: x["momentum"], reverse=True)
+
+            # Take up to available_slots entries
+            for cand in candidates[:available_slots]:
+                ep = cand["close"]
+                rh = cand["ref_high"]
+                rh_type = cand["ref_high_type"]
+                sp = round(ep * (1 - STOP_LOSS_PCT), 2)
+                tp = round(rh * (1 + TARGET_ABOVE_HIGH_PCT), 2)
+
+                allocation = PER_POSITION_CAPITAL
+                if cash < allocation:
+                    allocation = cash  # use whatever is left
+                if allocation < ep:
+                    continue  # not enough capital for even 1 share
+
+                shares = int(allocation / ep)
+                if shares <= 0:
+                    continue
+
+                cost = ep * shares
+                cash -= cost
+
+                open_positions[cand["symbol"]] = {
+                    "entry_price": ep,
+                    "stop_price": sp,
+                    "target_price": tp,
+                    "ref_high": rh,
+                    "ref_high_type": rh_type,
+                    "entry_date": pd.Timestamp(day),
+                    "shares": shares,
+                    "bars_held": 0,
+                    "allocation": allocation,
+                }
+
+        # === STEP 3: TRACK EQUITY ===
+        max_concurrent = max(max_concurrent, len(open_positions))
+
+        # Mark-to-market: value open positions at today's close
+        invested_value = 0.0
+        for symbol, pos in open_positions.items():
+            row = symbol_date_rows.get(symbol, {}).get(day)
+            if row is not None:
+                invested_value += float(row["close"]) * pos["shares"]
+            else:
+                # No data for this stock today, use entry price as fallback
+                invested_value += pos["entry_price"] * pos["shares"]
+
+        total_equity = cash + invested_value
+        equity_history.append({
+            "date": day,
+            "equity": round(total_equity, 2),
+            "cash": round(cash, 2),
+            "invested": round(invested_value, 2),
+            "open_positions": len(open_positions),
         })
 
-    return trades
+    # -------------------------------------------------------------------------
+    # Close any remaining open positions at end of data
+    # -------------------------------------------------------------------------
+    if open_positions:
+        last_day = trading_dates[-1]
+        for symbol, pos in open_positions.items():
+            row = symbol_date_rows.get(symbol, {}).get(last_day)
+            if row is not None:
+                exit_price = float(row["close"])
+            else:
+                exit_price = pos["entry_price"]  # fallback
+
+            pnl_rs = (exit_price - pos["entry_price"]) * pos["shares"]
+            pnl_pct = (exit_price - pos["entry_price"]) / pos["entry_price"] * 100
+
+            completed_trades.append({
+                "Symbol":         symbol,
+                "Entry_Date":     pos["entry_date"],
+                "Exit_Date":      pd.Timestamp(last_day),
+                "Signal_Type":    signal_type_label(pos["ref_high_type"]),
+                "Entry_Price":    round(pos["entry_price"], 2),
+                "Exit_Price":     round(exit_price, 2),
+                "Ref_High":       round(pos["ref_high"], 2),
+                "Ref_High_Type":  pos["ref_high_type"],
+                "Target_Price":   round(pos["target_price"], 2),
+                "Stop_Price":     round(pos["stop_price"], 2),
+                "Shares":         pos["shares"],
+                "PnL_Rs":         round(pnl_rs, 2),
+                "PnL_Pct":        round(pnl_pct, 2),
+                "Hold_Days":      pos["bars_held"],
+                "Exit_Reason":    "End_Of_Data",
+                "Entry_Month":    pos["entry_date"].strftime("%Y-%m"),
+                "Allocation":     round(pos["allocation"], 2),
+            })
+
+    return completed_trades, equity_history
 
 # =============================================================================
 # PERFORMANCE REPORT
 # =============================================================================
-def performance_report(trades_df: pd.DataFrame, label: str = "NEAR HIGH BACKTEST"):
+def performance_report(
+    trades_df: pd.DataFrame,
+    equity_history: list[dict],
+    label: str = "NEAR HIGH PORTFOLIO BACKTEST",
+):
     sep = "=" * 70
     print(f"\n{sep}")
     print(f"  {label}")
@@ -428,15 +562,42 @@ def performance_report(trades_df: pd.DataFrame, label: str = "NEAR HIGH BACKTEST
     best  = trades_df.loc[trades_df["PnL_Rs"].idxmax()]  if total > 0 else None
     worst = trades_df.loc[trades_df["PnL_Rs"].idxmin()]  if total > 0 else None
 
-    # Simple equity curve for drawdown
-    eq = INITIAL_CAPITAL + trades_df.sort_values("Exit_Date")["PnL_Rs"].cumsum()
-    peak = eq.cummax()
-    dd   = (eq - peak) / peak * 100
-    max_dd = dd.min() if not dd.empty else 0
+    # Equity curve drawdown (from day-by-day equity history)
+    if equity_history:
+        eq_df = pd.DataFrame(equity_history)
+        eq_series = eq_df["equity"]
+        peak = eq_series.cummax()
+        dd = (eq_series - peak) / peak * 100
+        max_dd = dd.min()
+        final_equity = eq_series.iloc[-1]
+    else:
+        max_dd = 0
+        final_equity = INITIAL_CAPITAL
 
     avg_hold = trades_df["Hold_Days"].mean()
 
+    # Portfolio-specific stats
+    if equity_history:
+        eq_df = pd.DataFrame(equity_history)
+        max_concurrent = eq_df["open_positions"].max()
+        avg_positions = eq_df["open_positions"].mean()
+        avg_invested = eq_df["invested"].mean()
+        avg_utilization = avg_invested / INITIAL_CAPITAL * 100
+        days_fully_invested = (eq_df["open_positions"] == MAX_POSITIONS).sum()
+        days_no_positions = (eq_df["open_positions"] == 0).sum()
+        total_days = len(eq_df)
+    else:
+        max_concurrent = 0
+        avg_positions = 0
+        avg_utilization = 0
+        days_fully_invested = 0
+        days_no_positions = 0
+        total_days = 0
+
     print(f"  Initial Capital : Rs {INITIAL_CAPITAL:>14,.0f}")
+    print(f"  Final Equity    : Rs {final_equity:>14,.0f}")
+    print(f"  Max Positions   : {MAX_POSITIONS:>12d}")
+    print(f"  Per-Position Cap: Rs {PER_POSITION_CAPITAL:>14,.0f}")
     print(f"  Total Trades    : {total:>12d}")
     print(f"  Win Rate        : {win_rate:>11.2f}%")
     print(f"  Net P&L         : Rs {net_pnl:>14,.0f}")
@@ -450,6 +611,13 @@ def performance_report(trades_df: pd.DataFrame, label: str = "NEAR HIGH BACKTEST
         print(f"  Best Trade      : {best['Symbol']}  Rs {best['PnL_Rs']:,.0f}  ({best['PnL_Pct']:.1f}%)")
     if worst is not None:
         print(f"  Worst Trade     : {worst['Symbol']}  Rs {worst['PnL_Rs']:,.0f}  ({worst['PnL_Pct']:.1f}%)")
+
+    print(f"\n  PORTFOLIO STATS:")
+    print(f"    Max Concurrent Positions : {max_concurrent}")
+    print(f"    Avg Positions Open       : {avg_positions:.2f}")
+    print(f"    Capital Utilization (avg): {avg_utilization:.1f}%")
+    print(f"    Days Fully Invested      : {days_fully_invested} / {total_days}")
+    print(f"    Days with No Positions   : {days_no_positions} / {total_days}")
 
     print(f"\n  EXIT REASON BREAKDOWN:")
     for reason, cnt in trades_df["Exit_Reason"].value_counts().items():
@@ -492,7 +660,8 @@ def run_backtest(
     os.makedirs(CACHE_DIR, exist_ok=True)
 
     print("\n" + "=" * 70)
-    print("  NEAR HIGH BACKTEST - STANDALONE (NO OLIVER KELL)")
+    print("  NEAR HIGH BACKTEST - PORTFOLIO-BASED")
+    print(f"  Capital: Rs {INITIAL_CAPITAL:,.0f}  |  Max Positions: {MAX_POSITIONS}  |  Per Slot: Rs {PER_POSITION_CAPITAL:,.0f}")
     print(f"  EMA Alignment + Close within {int((1-NEAR_HIGH_UPPER)*100)}-{int((1-NEAR_HIGH_LOWER)*100)}% of Key High")
     print(f"  Stop: {STOP_LOSS_PCT*100:.0f}%  |  Target: {TARGET_ABOVE_HIGH_PCT*100:.0f}% above ref high")
     print(f"  Lookback: {LOOKBACK_DAYS} days  |  Fetch: {FETCH_YEARS} years")
@@ -526,11 +695,18 @@ def run_backtest(
     print(f"\nUniverse: {total:,} stocks\n")
 
     # Date range for fetching
-    today     = datetime.date.today()
+    today      = datetime.date.today()
     fetch_end  = today.strftime("%Y-%m-%d")
     fetch_start = (today - datetime.timedelta(days=365 * FETCH_YEARS)).strftime("%Y-%m-%d")
 
-    all_trades = []
+    # =========================================================================
+    # FIRST PASS: Fetch data + compute indicators for ALL stocks
+    # =========================================================================
+    print("=" * 50)
+    print("  PASS 1: Fetching data & computing indicators")
+    print("=" * 50)
+
+    stock_data = {}   # symbol -> DataFrame with indicators
     processed  = 0
     skipped    = 0
 
@@ -540,7 +716,7 @@ def run_backtest(
             elapsed = time.time() - t0
             rate    = i / max(elapsed, 1)
             eta_m   = (total - i) / rate / 60 if rate > 0 else 0
-            print(f"  [{i:4d}/{total}] {symbol:<18}  trades_so_far:{len(all_trades):4d}  "
+            print(f"  [{i:4d}/{total}] {symbol:<18}  stocks_ready:{len(stock_data):4d}  "
                   f"ETA:{eta_m:.1f}min", flush=True)
 
         try:
@@ -554,8 +730,7 @@ def run_backtest(
                 skipped += 1
                 continue
 
-            stock_trades = backtest_stock(symbol, df_ind)
-            all_trades.extend(stock_trades)
+            stock_data[symbol] = df_ind
             processed += 1
 
         except Exception as e:
@@ -563,7 +738,23 @@ def run_backtest(
             skipped += 1
 
     elapsed_m = (time.time() - t0) / 60
-    print(f"\n  Done. {processed:,} stocks processed, {skipped:,} skipped in {elapsed_m:.1f} min")
+    print(f"\n  Pass 1 done. {processed:,} stocks ready, {skipped:,} skipped in {elapsed_m:.1f} min")
+
+    if not stock_data:
+        print("  No stock data available. Exiting.")
+        return pd.DataFrame()
+
+    # =========================================================================
+    # SECOND PASS: Day-by-day portfolio simulation
+    # =========================================================================
+    print("\n" + "=" * 50)
+    print("  PASS 2: Portfolio simulation (day-by-day)")
+    print("=" * 50)
+
+    t1 = time.time()
+    all_trades, equity_history = portfolio_backtest(stock_data)
+    sim_elapsed = time.time() - t1
+    print(f"  Simulation done in {sim_elapsed:.1f}s")
     print(f"  Total trades: {len(all_trades):,}\n")
 
     if not all_trades:
@@ -575,13 +766,19 @@ def run_backtest(
     trades_df["Exit_Date"]  = pd.to_datetime(trades_df["Exit_Date"])
     trades_df.sort_values("Entry_Date", inplace=True)
 
-    performance_report(trades_df, label="NEAR HIGH BACKTEST - STANDALONE")
+    performance_report(trades_df, equity_history, label="NEAR HIGH PORTFOLIO BACKTEST")
 
     # Save results
     ts  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = f"near_high_backtest_results_{ts}.csv"
+    out = f"near_high_portfolio_backtest_{ts}.csv"
     trades_df.to_csv(out, index=False)
     print(f"  Results saved to: {out}")
+
+    # Save equity curve
+    if equity_history:
+        eq_out = f"near_high_equity_curve_{ts}.csv"
+        pd.DataFrame(equity_history).to_csv(eq_out, index=False)
+        print(f"  Equity curve saved to: {eq_out}")
 
     return trades_df
 

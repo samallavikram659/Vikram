@@ -1,9 +1,21 @@
 """
 =============================================================================
-NEAR HIGH + OLIVER KELL COMBINED BACKTEST
+NEAR HIGH + OLIVER KELL COMBINED BACKTEST  --  PORTFOLIO MODE
 =============================================================================
 UNIVERSE  : All NSE EQ-series stocks (~2500 from Angel One scrip master)
             Excludes: ETFs, Liquid Funds, Bonds, Index Funds
+
+PORTFOLIO : INITIAL_CAPITAL = Rs 1,00,000 (1 lakh)
+            MAX_POSITIONS   = 3 (max 3 stocks held at any time)
+            Equal allocation: capital / 3 per position (~33,333 each)
+            Capital recycled on exit
+
+SIMULATION: Two-pass approach
+            Pass 1 - Fetch data + compute indicators for ALL stocks
+            Pass 2 - Iterate day-by-day across all trading dates
+              (a) Check all open positions for exits first
+              (b) Then scan for new entry signals (if open < MAX_POSITIONS)
+              (c) On ties, pick highest momentum (closest to reference high)
 
 ENTRY     : EMA alignment (Close > EMA5 > EMA10 > EMA20 > EMA50 > EMA150 > EMA200)
           + Close within 5-10% BELOW the key high (1Y / 5Y / ATH)
@@ -45,25 +57,28 @@ ANGEL_CLIENT_ID      = "S63068620"
 ANGEL_CLIENT_PIN     = "4098"
 ANGEL_TOTP_SECRET    = "KVTELUFGR33YCPQUKO3ZSL4NMA"
 
-INITIAL_CAPITAL      = 1_000_000          # Rs 10 lakh
-POSITION_SIZE_PCT    = 0.15               # 15% per trade
-STOP_LOSS_PCT        = 0.05               # 5% stop loss
-TARGET_ABOVE_HIGH_PCT = 0.10              # 10% above ref high
-NEAR_HIGH_LOWER      = 0.90              # 10% below high (lower bound)
-NEAR_HIGH_UPPER      = 0.95              # 5% below high (upper bound)
-LOOKBACK_DAYS        = 365               # backtest window in days
-FETCH_YEARS          = 6                 # years of history to fetch
-NIFTY_TOKEN          = "99926000"        # Nifty 50 token on NSE
+INITIAL_CAPITAL      = 100_000               # Rs 1 lakh
+MAX_POSITIONS        = 3                     # max concurrent positions
+STOP_LOSS_PCT        = 0.05                  # 5% stop loss
+TARGET_ABOVE_HIGH_PCT = 0.10                 # 10% above ref high
+NEAR_HIGH_LOWER      = 0.90                  # 10% below high (lower bound)
+NEAR_HIGH_UPPER      = 0.95                  # 5% below high (upper bound)
+LOOKBACK_DAYS        = 365                   # backtest window in days
+FETCH_YEARS          = 6                     # years of history to fetch
+NIFTY_TOKEN          = "99926000"            # Nifty 50 token on NSE
 
 # Oliver Kell specific config
-MINI_BASE_BARS       = 7                 # window for mini-base detection
-MINI_BASE_MIN        = 4                 # minimum qualifying bars in base
-EXTENSION_MULT       = 3.0               # ATR multiplier for extension exit
-MIN_HOLD_DAYS        = 2                 # hold for at least this many bars before trailing stop
-RS_LOOKBACK          = 20               # days for relative-strength calculation
+MINI_BASE_BARS       = 7                     # window for mini-base detection
+MINI_BASE_MIN        = 4                     # minimum qualifying bars in base
+EXTENSION_MULT       = 3.0                   # ATR multiplier for extension exit
+MIN_HOLD_DAYS        = 2                     # hold for at least this many bars before trailing stop
+RS_LOOKBACK          = 20                    # days for relative-strength calculation
 
 CACHE_DIR            = "cache_near_high"
-MIN_DATA_DAYS        = 252               # minimum bars needed
+MIN_DATA_DAYS        = 252                   # minimum bars needed
+
+# Derived
+PER_POSITION_CAPITAL = INITIAL_CAPITAL / MAX_POSITIONS  # ~33,333 per slot
 
 # =============================================================================
 # ETF / FUND EXCLUSION PATTERNS
@@ -377,49 +392,99 @@ def signal_type_label(ref_high_type: str, oliver_type: str) -> str:
     return f"NearHigh_{oliver_type}_{ref_high_type}"
 
 # =============================================================================
-# SINGLE-STOCK BACKTEST
+# MOMENTUM SCORE (for ranking same-day entry candidates)
 # =============================================================================
-def backtest_stock(symbol: str, df: pd.DataFrame) -> list[dict]:
-    """Run bar-by-bar simulation for a single stock. Returns list of trade dicts."""
-    trades = []
+def momentum_score(close: float, ref_high: float) -> float:
+    """
+    Higher score = closer to reference high = higher momentum.
+    Returns close / ref_high ratio (0 to 1+).
+    """
+    if ref_high <= 0 or pd.isna(ref_high):
+        return 0.0
+    return close / ref_high
 
-    today   = datetime.date.today()
+# =============================================================================
+# PORTFOLIO-BASED BACKTEST
+# =============================================================================
+def backtest_portfolio(stock_data: dict[str, pd.DataFrame]) -> tuple[list[dict], list[dict]]:
+    """
+    Run day-by-day portfolio simulation across all stocks.
+
+    Args:
+        stock_data: {symbol: DataFrame} where each DataFrame has all indicators computed.
+
+    Returns:
+        (trades, equity_curve) where:
+          trades      = list of trade dicts
+          equity_curve = list of {Date, Equity, Drawdown_Pct, Open_Positions, ...}
+    """
+    today    = datetime.date.today()
     bt_start = today - datetime.timedelta(days=LOOKBACK_DAYS)
-    bt_df   = df[df.index.date >= bt_start].copy()
-    if bt_df.empty:
-        return trades
 
-    in_trade      = False
-    entry_price   = 0.0
-    stop_price    = 0.0
-    target_price  = 0.0
-    ref_high      = 0.0
-    ref_high_type = ""
-    oliver_type   = ""
-    entry_date    = None
-    bars_held     = 0
+    # ---- Collect all unique trading dates across all stocks ----
+    all_dates = set()
+    stock_bt_data = {}  # {symbol: DataFrame} restricted to backtest window
 
-    rows = bt_df.reset_index()   # columns: datetime, open, high, low, close, ...
+    for symbol, df in stock_data.items():
+        bt_df = df[df.index.date >= bt_start].copy()
+        if bt_df.empty:
+            continue
+        stock_bt_data[symbol] = bt_df
+        all_dates.update(bt_df.index)
 
-    for i, row in rows.iterrows():
-        if in_trade:
-            bars_held += 1
+    if not all_dates:
+        return [], []
+
+    all_dates = sorted(all_dates)
+
+    # ---- Portfolio state ----
+    cash = float(INITIAL_CAPITAL)
+    open_positions = {}  # symbol -> position dict
+    trades = []
+    equity_curve = []
+    peak_equity = float(INITIAL_CAPITAL)
+    max_concurrent = 0
+
+    # Pre-build per-stock row lookups for fast access
+    # For each stock, build a dict: {timestamp -> row_as_dict}
+    stock_row_lookup = {}
+    for symbol, bt_df in stock_bt_data.items():
+        row_dict = {}
+        for ts, row in bt_df.iterrows():
+            row_dict[ts] = row
+        stock_row_lookup[symbol] = row_dict
+
+    # ---- Day-by-day simulation ----
+    for dt in all_dates:
+        # ================================================================
+        # STEP 1: CHECK ALL OPEN POSITIONS FOR EXIT CONDITIONS
+        # ================================================================
+        symbols_to_close = []
+
+        for symbol, pos in open_positions.items():
+            if symbol not in stock_row_lookup:
+                continue
+            row = stock_row_lookup[symbol].get(dt)
+            if row is None:
+                continue  # stock did not trade this day
+
+            pos["bars_held"] += 1
+            bars_held = pos["bars_held"]
             exit_reason = None
             exit_price  = 0.0
 
             # 1. Hard stop loss (on Low)
-            if row["low"] <= stop_price:
-                exit_price  = stop_price
+            if row["low"] <= pos["stop_price"]:
+                exit_price  = pos["stop_price"]
                 exit_reason = "Stop_Loss"
 
             # 2. Target hit (on High)
-            elif row["high"] >= target_price:
-                exit_price  = target_price
+            elif row["high"] >= pos["target_price"]:
+                exit_price  = pos["target_price"]
                 exit_reason = "Target_Hit"
 
             # 3. Oliver trailing EMA stop (only after MIN_HOLD_DAYS)
             elif bars_held > MIN_HOLD_DAYS:
-                # Use EMA10 after MIN_HOLD_DAYS, otherwise EMA20
                 trail_ema = row["EMA10"] if bars_held > MIN_HOLD_DAYS else row["EMA20"]
                 if row["close"] < trail_ema:
                     exit_price  = float(row["close"])
@@ -432,96 +497,191 @@ def backtest_stock(symbol: str, df: pd.DataFrame) -> list[dict]:
                     exit_reason = "Extension_Exit"
 
             if exit_reason:
-                shares  = int(INITIAL_CAPITAL * POSITION_SIZE_PCT / entry_price)
-                pnl_rs  = (exit_price - entry_price) * shares
-                pnl_pct = (exit_price - entry_price) / entry_price * 100
+                pnl_rs  = (exit_price - pos["entry_price"]) * pos["shares"]
+                pnl_pct = (exit_price - pos["entry_price"]) / pos["entry_price"] * 100
 
                 trades.append({
                     "Symbol":         symbol,
-                    "Entry_Date":     entry_date,
-                    "Exit_Date":      row["datetime"],
-                    "Signal_Type":    signal_type_label(ref_high_type, oliver_type),
-                    "Entry_Price":    round(entry_price, 2),
+                    "Entry_Date":     pos["entry_date"],
+                    "Exit_Date":      dt,
+                    "Signal_Type":    signal_type_label(pos["ref_high_type"], pos["oliver_type"]),
+                    "Entry_Price":    round(pos["entry_price"], 2),
                     "Exit_Price":     round(exit_price, 2),
-                    "Ref_High":       round(ref_high, 2),
-                    "Ref_High_Type":  ref_high_type,
-                    "Oliver_Type":    oliver_type,
-                    "Target_Price":   round(target_price, 2),
-                    "Stop_Price":     round(stop_price, 2),
-                    "Shares":         shares,
+                    "Ref_High":       round(pos["ref_high"], 2),
+                    "Ref_High_Type":  pos["ref_high_type"],
+                    "Oliver_Type":    pos["oliver_type"],
+                    "Target_Price":   round(pos["target_price"], 2),
+                    "Stop_Price":     round(pos["stop_price"], 2),
+                    "Shares":         pos["shares"],
                     "PnL_Rs":         round(pnl_rs, 2),
                     "PnL_Pct":        round(pnl_pct, 2),
                     "Hold_Days":      bars_held,
                     "Exit_Reason":    exit_reason,
-                    "Entry_Month":    entry_date.strftime("%Y-%m"),
+                    "Entry_Month":    pos["entry_date"].strftime("%Y-%m"),
+                    "Allocated_Capital": round(pos["allocated_capital"], 2),
                 })
-                in_trade  = False
-                bars_held = 0
 
-        else:
-            # Look for combined signal
-            if not row["Signal"]:
-                continue
+                # Return capital (allocated + pnl)
+                cash += pos["allocated_capital"] + pnl_rs
+                symbols_to_close.append(symbol)
 
-            rh, rh_type = get_ref_high(row)
-            if pd.isna(rh) or rh <= 0:
-                continue
+        for s in symbols_to_close:
+            del open_positions[s]
 
-            # Determine Oliver sub-type (Wedge_Pop takes priority)
-            if bool(row["Wedge_Pop"]):
-                ok_type = "Wedge"
-            elif bool(row["Crossback"]):
-                ok_type = "Crossback"
+        # ================================================================
+        # STEP 2: SCAN FOR NEW ENTRY SIGNALS (if slots available)
+        # ================================================================
+        available_slots = MAX_POSITIONS - len(open_positions)
+
+        if available_slots > 0:
+            entry_candidates = []
+
+            for symbol, row_dict in stock_row_lookup.items():
+                if symbol in open_positions:
+                    continue  # already holding this stock
+                row = row_dict.get(dt)
+                if row is None:
+                    continue
+                if not row["Signal"]:
+                    continue
+
+                rh, rh_type = get_ref_high(row)
+                if pd.isna(rh) or rh <= 0:
+                    continue
+
+                # Determine Oliver sub-type (Wedge_Pop takes priority)
+                if bool(row["Wedge_Pop"]):
+                    ok_type = "Wedge"
+                elif bool(row["Crossback"]):
+                    ok_type = "Crossback"
+                else:
+                    continue
+
+                close_price = float(row["close"])
+                score = momentum_score(close_price, rh)
+
+                entry_candidates.append({
+                    "symbol":      symbol,
+                    "close":       close_price,
+                    "ref_high":    rh,
+                    "ref_high_type": rh_type,
+                    "oliver_type": ok_type,
+                    "momentum":    score,
+                    "row":         row,
+                })
+
+            # Sort by highest momentum (closest to reference high)
+            entry_candidates.sort(key=lambda x: x["momentum"], reverse=True)
+
+            # Take up to available_slots
+            for cand in entry_candidates[:available_slots]:
+                ep = cand["close"]
+                sp = round(ep * (1 - STOP_LOSS_PCT), 2)
+                tp = round(cand["ref_high"] * (1 + TARGET_ABOVE_HIGH_PCT), 2)
+
+                # Allocate capital for this position
+                alloc = min(PER_POSITION_CAPITAL, cash)
+                if alloc < 1.0 or ep <= 0:
+                    continue  # not enough capital
+
+                shares = int(alloc / ep)
+                if shares < 1:
+                    continue
+
+                actual_cost = shares * ep
+                if actual_cost > cash:
+                    continue
+
+                cash -= actual_cost
+
+                open_positions[cand["symbol"]] = {
+                    "entry_price":      ep,
+                    "stop_price":       sp,
+                    "target_price":     tp,
+                    "ref_high":         cand["ref_high"],
+                    "ref_high_type":    cand["ref_high_type"],
+                    "oliver_type":      cand["oliver_type"],
+                    "entry_date":       dt,
+                    "bars_held":        0,
+                    "shares":           shares,
+                    "allocated_capital": actual_cost,
+                }
+
+        # ================================================================
+        # STEP 3: TRACK EQUITY CURVE
+        # ================================================================
+        positions_value = 0.0
+        for symbol, pos in open_positions.items():
+            row = stock_row_lookup.get(symbol, {}).get(dt)
+            if row is not None:
+                positions_value += pos["shares"] * float(row["close"])
             else:
-                continue   # Signal set but neither sub-type active (shouldn't happen)
+                # Use last known price (entry price as fallback)
+                positions_value += pos["allocated_capital"]
 
-            ep = float(row["close"])
-            sp = round(ep * (1 - STOP_LOSS_PCT), 2)
-            tp = round(rh * (1 + TARGET_ABOVE_HIGH_PCT), 2)
+        total_equity = cash + positions_value
+        peak_equity = max(peak_equity, total_equity)
+        drawdown_pct = (total_equity - peak_equity) / peak_equity * 100 if peak_equity > 0 else 0.0
 
-            in_trade      = True
-            entry_price   = ep
-            stop_price    = sp
-            target_price  = tp
-            ref_high      = rh
-            ref_high_type = rh_type
-            oliver_type   = ok_type
-            entry_date    = row["datetime"]
-            bars_held     = 0
+        n_open = len(open_positions)
+        max_concurrent = max(max_concurrent, n_open)
 
-    # Close open trade at end of data
-    if in_trade and len(rows) > 0:
-        last    = rows.iloc[-1]
-        ep_exit = float(last["close"])
-        shares  = int(INITIAL_CAPITAL * POSITION_SIZE_PCT / entry_price)
-        pnl_rs  = (ep_exit - entry_price) * shares
-        pnl_pct = (ep_exit - entry_price) / entry_price * 100
-        trades.append({
-            "Symbol":         symbol,
-            "Entry_Date":     entry_date,
-            "Exit_Date":      last["datetime"],
-            "Signal_Type":    signal_type_label(ref_high_type, oliver_type),
-            "Entry_Price":    round(entry_price, 2),
-            "Exit_Price":     round(ep_exit, 2),
-            "Ref_High":       round(ref_high, 2),
-            "Ref_High_Type":  ref_high_type,
-            "Oliver_Type":    oliver_type,
-            "Target_Price":   round(target_price, 2),
-            "Stop_Price":     round(stop_price, 2),
-            "Shares":         shares,
-            "PnL_Rs":         round(pnl_rs, 2),
-            "PnL_Pct":        round(pnl_pct, 2),
-            "Hold_Days":      bars_held,
-            "Exit_Reason":    "End_Of_Data",
-            "Entry_Month":    entry_date.strftime("%Y-%m"),
+        equity_curve.append({
+            "Date":            dt,
+            "Equity":          round(total_equity, 2),
+            "Cash":            round(cash, 2),
+            "Positions_Value": round(positions_value, 2),
+            "Open_Positions":  n_open,
+            "Peak_Equity":     round(peak_equity, 2),
+            "Drawdown_Pct":    round(drawdown_pct, 2),
         })
 
-    return trades
+    # ================================================================
+    # CLOSE ANY REMAINING OPEN POSITIONS AT END OF DATA
+    # ================================================================
+    if open_positions and all_dates:
+        last_date = all_dates[-1]
+        for symbol, pos in list(open_positions.items()):
+            row = stock_row_lookup.get(symbol, {}).get(last_date)
+            if row is not None:
+                ep_exit = float(row["close"])
+            else:
+                ep_exit = pos["entry_price"]  # fallback
+
+            pnl_rs  = (ep_exit - pos["entry_price"]) * pos["shares"]
+            pnl_pct = (ep_exit - pos["entry_price"]) / pos["entry_price"] * 100
+
+            trades.append({
+                "Symbol":         symbol,
+                "Entry_Date":     pos["entry_date"],
+                "Exit_Date":      last_date,
+                "Signal_Type":    signal_type_label(pos["ref_high_type"], pos["oliver_type"]),
+                "Entry_Price":    round(pos["entry_price"], 2),
+                "Exit_Price":     round(ep_exit, 2),
+                "Ref_High":       round(pos["ref_high"], 2),
+                "Ref_High_Type":  pos["ref_high_type"],
+                "Oliver_Type":    pos["oliver_type"],
+                "Target_Price":   round(pos["target_price"], 2),
+                "Stop_Price":     round(pos["stop_price"], 2),
+                "Shares":         pos["shares"],
+                "PnL_Rs":         round(pnl_rs, 2),
+                "PnL_Pct":        round(pnl_pct, 2),
+                "Hold_Days":      pos["bars_held"],
+                "Exit_Reason":    "End_Of_Data",
+                "Entry_Month":    pos["entry_date"].strftime("%Y-%m"),
+                "Allocated_Capital": round(pos["allocated_capital"], 2),
+            })
+
+    return trades, equity_curve
 
 # =============================================================================
 # PERFORMANCE REPORT
 # =============================================================================
-def performance_report(trades_df: pd.DataFrame, label: str = "NEAR HIGH + OLIVER KELL BACKTEST"):
+def performance_report(
+    trades_df: pd.DataFrame,
+    equity_curve_df: pd.DataFrame,
+    label: str = "NEAR HIGH + OLIVER KELL PORTFOLIO BACKTEST",
+):
     sep = "=" * 70
     print(f"\n{sep}")
     print(f"  {label}")
@@ -548,27 +708,54 @@ def performance_report(trades_df: pd.DataFrame, label: str = "NEAR HIGH + OLIVER
     best  = trades_df.loc[trades_df["PnL_Rs"].idxmax()]  if total > 0 else None
     worst = trades_df.loc[trades_df["PnL_Rs"].idxmin()]  if total > 0 else None
 
-    eq   = INITIAL_CAPITAL + trades_df.sort_values("Exit_Date")["PnL_Rs"].cumsum()
-    peak = eq.cummax()
-    dd   = (eq - peak) / peak * 100
-    max_dd = dd.min() if not dd.empty else 0
+    # Drawdown from equity curve (proper day-by-day)
+    if not equity_curve_df.empty:
+        max_dd = equity_curve_df["Drawdown_Pct"].min()
+        final_equity = equity_curve_df["Equity"].iloc[-1]
+    else:
+        max_dd = 0.0
+        final_equity = INITIAL_CAPITAL + net_pnl
 
     avg_hold = trades_df["Hold_Days"].mean()
 
-    print(f"  Initial Capital : Rs {INITIAL_CAPITAL:>14,.0f}")
-    print(f"  Total Trades    : {total:>12d}")
-    print(f"  Win Rate        : {win_rate:>11.2f}%")
-    print(f"  Net P&L         : Rs {net_pnl:>14,.0f}")
-    print(f"  Total Return    : {total_return:>11.2f}%")
-    print(f"  Max Drawdown    : {max_dd:>11.2f}%")
-    print(f"  Profit Factor   : {profit_factor:>12.2f}")
-    print(f"  Avg Win         : {avg_win:>11.2f}%")
-    print(f"  Avg Loss        : {avg_loss:>11.2f}%")
-    print(f"  Avg Hold Days   : {avg_hold:>12.1f}")
+    # Portfolio-specific stats
+    if not equity_curve_df.empty:
+        max_concurrent = equity_curve_df["Open_Positions"].max()
+        days_with_positions = (equity_curve_df["Open_Positions"] > 0).sum()
+        total_days = len(equity_curve_df)
+        capital_utilization = days_with_positions / total_days * 100 if total_days > 0 else 0
+        avg_positions = equity_curve_df["Open_Positions"].mean()
+    else:
+        max_concurrent = 0
+        capital_utilization = 0
+        avg_positions = 0
+
+    print(f"  PORTFOLIO CONFIGURATION:")
+    print(f"  Initial Capital    : Rs {INITIAL_CAPITAL:>14,.0f}")
+    print(f"  Max Positions      : {MAX_POSITIONS:>12d}")
+    print(f"  Per-Position Size  : Rs {PER_POSITION_CAPITAL:>14,.0f}")
+
+    print(f"\n  PERFORMANCE SUMMARY:")
+    print(f"  Final Equity       : Rs {final_equity:>14,.0f}")
+    print(f"  Net P&L            : Rs {net_pnl:>14,.0f}")
+    print(f"  Total Return       : {total_return:>11.2f}%")
+    print(f"  Total Trades       : {total:>12d}")
+    print(f"  Win Rate           : {win_rate:>11.2f}%")
+    print(f"  Max Drawdown       : {max_dd:>11.2f}%")
+    print(f"  Profit Factor      : {profit_factor:>12.2f}")
+    print(f"  Avg Win            : {avg_win:>11.2f}%")
+    print(f"  Avg Loss           : {avg_loss:>11.2f}%")
+    print(f"  Avg Hold Days      : {avg_hold:>12.1f}")
     if best is not None:
-        print(f"  Best Trade      : {best['Symbol']}  Rs {best['PnL_Rs']:,.0f}  ({best['PnL_Pct']:.1f}%)")
+        print(f"  Best Trade         : {best['Symbol']}  Rs {best['PnL_Rs']:,.0f}  ({best['PnL_Pct']:.1f}%)")
     if worst is not None:
-        print(f"  Worst Trade     : {worst['Symbol']}  Rs {worst['PnL_Rs']:,.0f}  ({worst['PnL_Pct']:.1f}%)")
+        print(f"  Worst Trade        : {worst['Symbol']}  Rs {worst['PnL_Rs']:,.0f}  ({worst['PnL_Pct']:.1f}%)")
+
+    print(f"\n  PORTFOLIO-SPECIFIC STATS:")
+    print(f"  Max Concurrent Pos : {max_concurrent:>12d}")
+    print(f"  Avg Concurrent Pos : {avg_positions:>12.2f}")
+    print(f"  Capital Utilization: {capital_utilization:>11.2f}%  (days with >= 1 position)")
+    print(f"  Trading Days       : {len(equity_curve_df) if not equity_curve_df.empty else 0:>12d}")
 
     print(f"\n  EXIT REASON BREAKDOWN:")
     for reason, cnt in trades_df["Exit_Reason"].value_counts().items():
@@ -626,11 +813,13 @@ def run_backtest(
     os.makedirs(CACHE_DIR, exist_ok=True)
 
     print("\n" + "=" * 70)
-    print("  NEAR HIGH + OLIVER KELL COMBINED BACKTEST")
+    print("  NEAR HIGH + OLIVER KELL PORTFOLIO BACKTEST")
     print(f"  EMA Alignment + Near High ({int((1-NEAR_HIGH_UPPER)*100)}-{int((1-NEAR_HIGH_LOWER)*100)}% below) + Wedge_Pop | Crossback")
     print(f"  Stop: {STOP_LOSS_PCT*100:.0f}%  |  Target: {TARGET_ABOVE_HIGH_PCT*100:.0f}% above ref high")
     print(f"  Extension mult: {EXTENSION_MULT}x ATR  |  Min hold: {MIN_HOLD_DAYS} bars")
     print(f"  Lookback: {LOOKBACK_DAYS} days  |  Fetch: {FETCH_YEARS} years")
+    print(f"  Capital: Rs {INITIAL_CAPITAL:,.0f}  |  Max Positions: {MAX_POSITIONS}")
+    print(f"  Per-Position: Rs {PER_POSITION_CAPITAL:,.0f}")
     print("=" * 70)
 
     # Login
@@ -673,7 +862,11 @@ def run_backtest(
     else:
         print(f"  Nifty data: {len(nifty_close):,} bars")
 
-    all_trades = []
+    # =================================================================
+    # PASS 1: Fetch data + compute indicators for ALL stocks
+    # =================================================================
+    print(f"\n--- PASS 1: Fetching data & computing indicators for {total:,} stocks ---\n")
+    stock_data = {}  # {symbol: DataFrame with indicators}
     processed  = 0
     skipped    = 0
 
@@ -683,7 +876,7 @@ def run_backtest(
             elapsed = time.time() - t0
             rate    = i / max(elapsed, 1)
             eta_m   = (total - i) / rate / 60 if rate > 0 else 0
-            print(f"  [{i:4d}/{total}] {symbol:<18}  trades_so_far:{len(all_trades):4d}  "
+            print(f"  [{i:4d}/{total}] {symbol:<18}  loaded:{len(stock_data):4d}  "
                   f"ETA:{eta_m:.1f}min", flush=True)
 
         try:
@@ -697,8 +890,7 @@ def run_backtest(
                 skipped += 1
                 continue
 
-            stock_trades = backtest_stock(symbol, df_ind)
-            all_trades.extend(stock_trades)
+            stock_data[symbol] = df_ind
             processed += 1
 
         except Exception as e:
@@ -706,8 +898,23 @@ def run_backtest(
             skipped += 1
 
     elapsed_m = (time.time() - t0) / 60
-    print(f"\n  Done. {processed:,} stocks processed, {skipped:,} skipped in {elapsed_m:.1f} min")
-    print(f"  Total trades: {len(all_trades):,}\n")
+    print(f"\n  Pass 1 done. {processed:,} stocks loaded, {skipped:,} skipped in {elapsed_m:.1f} min")
+
+    if not stock_data:
+        print("  No stock data available. Exiting.")
+        return pd.DataFrame()
+
+    # =================================================================
+    # PASS 2: Day-by-day portfolio simulation
+    # =================================================================
+    print(f"\n--- PASS 2: Portfolio simulation ({len(stock_data):,} stocks) ---\n")
+
+    t1 = time.time()
+    all_trades, equity_curve = backtest_portfolio(stock_data)
+    sim_elapsed = (time.time() - t1) / 60
+
+    print(f"  Pass 2 done. {len(all_trades):,} trades in {sim_elapsed:.1f} min")
+    print(f"  Equity curve: {len(equity_curve):,} data points\n")
 
     if not all_trades:
         print("  No trades found. Exiting.")
@@ -718,13 +925,25 @@ def run_backtest(
     trades_df["Exit_Date"]  = pd.to_datetime(trades_df["Exit_Date"])
     trades_df.sort_values("Entry_Date", inplace=True)
 
-    performance_report(trades_df, label="NEAR HIGH + OLIVER KELL COMBINED BACKTEST")
+    equity_curve_df = pd.DataFrame(equity_curve)
+    if not equity_curve_df.empty:
+        equity_curve_df["Date"] = pd.to_datetime(equity_curve_df["Date"])
+
+    performance_report(
+        trades_df,
+        equity_curve_df,
+        label="NEAR HIGH + OLIVER KELL PORTFOLIO BACKTEST",
+    )
 
     # Save results
     ts  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = f"near_high_oliver_combined_results_{ts}.csv"
-    trades_df.to_csv(out, index=False)
-    print(f"  Results saved to: {out}")
+    out_trades = f"near_high_oliver_portfolio_trades_{ts}.csv"
+    trades_df.to_csv(out_trades, index=False)
+    print(f"  Trades saved to: {out_trades}")
+
+    out_equity = f"near_high_oliver_portfolio_equity_{ts}.csv"
+    equity_curve_df.to_csv(out_equity, index=False)
+    print(f"  Equity curve saved to: {out_equity}")
 
     return trades_df
 
