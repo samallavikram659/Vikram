@@ -66,6 +66,9 @@ NEAR_HIGH_UPPER      = 0.95                  # 5% below high (upper bound)
 LOOKBACK_DAYS        = 365                   # backtest window in days
 FETCH_YEARS          = 6                     # years of history to fetch
 NIFTY_TOKEN          = "99926000"            # Nifty 50 token on NSE
+RANK_METHOD          = "momentum"            # "roc" | "rs_nifty" | "near_ath" | "volume_surge" | "momentum"
+ROC_PERIOD           = 90                    # days for ROC and momentum calculation
+RS_RANK_PERIOD       = 90                    # days for RS vs Nifty ranking
 
 # Oliver Kell specific config
 MINI_BASE_BARS       = 7                     # window for mini-base detection
@@ -535,8 +538,49 @@ def compute_indicators(df: pd.DataFrame, nifty_close: pd.Series | None = None) -
     d["Oliver_Signal"] = d["Wedge_Pop"] | d["Crossback"]
     d["Signal"]        = d["EMA_Aligned"] & d["Near_High"] & d["Oliver_Signal"]
 
+    # Ranking indicators
+    d["ROC_90"]        = d["close"].pct_change(ROC_PERIOD) * 100
+    d["Momentum_90"]   = d["close"] / d["close"].shift(ROC_PERIOD)
+    d["Vol_Surge"]     = d["volume"] / d["volume"].rolling(20, min_periods=10).mean()
+    d["Pct_From_ATH"]  = (d["ATH"] - d["close"]) / d["ATH"] * 100
+
     d.dropna(subset=["EMA200", "High_1Y"], inplace=True)
     return d if len(d) > 0 else None
+
+
+# =============================================================================
+# RANK SCORE FUNCTION
+# =============================================================================
+def rank_score(row, close_price, ref_high, nifty_close=None, day=None):
+    if RANK_METHOD == "roc":
+        val = row.get("ROC_90", 0)
+        return float(val) if pd.notna(val) else 0.0
+
+    elif RANK_METHOD == "rs_nifty":
+        stock_ret = float(row.get("ROC_90", 0)) if pd.notna(row.get("ROC_90", 0)) else 0.0
+        if nifty_close is not None and not nifty_close.empty and day is not None:
+            try:
+                nifty_at = nifty_close.asof(day)
+                nifty_past = nifty_close.asof(day - pd.Timedelta(days=RS_RANK_PERIOD))
+                if pd.notna(nifty_at) and pd.notna(nifty_past) and nifty_past > 0:
+                    nifty_ret = (nifty_at - nifty_past) / nifty_past * 100
+                    return stock_ret - nifty_ret
+            except Exception:
+                pass
+        return stock_ret
+
+    elif RANK_METHOD == "near_ath":
+        val = row.get("Pct_From_ATH", 100)
+        return -float(val) if pd.notna(val) else -100.0
+
+    elif RANK_METHOD == "volume_surge":
+        val = row.get("Vol_Surge", 0)
+        return float(val) if pd.notna(val) else 0.0
+
+    else:  # "momentum" (default - 90 day momentum)
+        val = row.get("Momentum_90", 0)
+        return float(val) if pd.notna(val) else 0.0
+
 
 # =============================================================================
 # REFERENCE HIGH SELECTION
@@ -564,19 +608,10 @@ def signal_type_label(ref_high_type: str, oliver_type: str) -> str:
 # =============================================================================
 # MOMENTUM SCORE (for ranking same-day entry candidates)
 # =============================================================================
-def momentum_score(close: float, ref_high: float) -> float:
-    """
-    Higher score = closer to reference high = higher momentum.
-    Returns close / ref_high ratio (0 to 1+).
-    """
-    if ref_high <= 0 or pd.isna(ref_high):
-        return 0.0
-    return close / ref_high
-
 # =============================================================================
 # PORTFOLIO-BASED BACKTEST
 # =============================================================================
-def backtest_portfolio(stock_data: dict[str, pd.DataFrame]) -> tuple[list[dict], list[dict]]:
+def backtest_portfolio(stock_data: dict[str, pd.DataFrame], nifty_close=None) -> tuple[list[dict], list[dict]]:
     """
     Run day-by-day portfolio simulation across all stocks.
 
@@ -728,7 +763,7 @@ def backtest_portfolio(stock_data: dict[str, pd.DataFrame]) -> tuple[list[dict],
                     continue
 
                 close_price = float(row["close"])
-                score = momentum_score(close_price, rh)
+                score = rank_score(row, close_price, rh, nifty_close, pd.Timestamp(dt))
 
                 entry_candidates.append({
                     "symbol":      symbol,
@@ -736,12 +771,12 @@ def backtest_portfolio(stock_data: dict[str, pd.DataFrame]) -> tuple[list[dict],
                     "ref_high":    rh,
                     "ref_high_type": rh_type,
                     "oliver_type": ok_type,
-                    "momentum":    score,
+                    "rank_score":  score,
                     "row":         row,
                 })
 
-            # Sort by highest momentum (closest to reference high)
-            entry_candidates.sort(key=lambda x: x["momentum"], reverse=True)
+            # Sort by ranking method (highest score first)
+            entry_candidates.sort(key=lambda x: x["rank_score"], reverse=True)
 
             # Take up to available_slots
             for cand in entry_candidates[:available_slots]:
@@ -1017,6 +1052,7 @@ def run_backtest(
     print(f"  Lookback: {LOOKBACK_DAYS} days  |  Fetch: {FETCH_YEARS} years")
     print(f"  Capital: Rs {INITIAL_CAPITAL:,.0f}  |  Max Positions: {MAX_POSITIONS}")
     print(f"  Per-Position: Rs {PER_POSITION_CAPITAL:,.0f}")
+    print(f"  Rank Method: {RANK_METHOD.upper()}  |  ROC Period: {ROC_PERIOD} days")
     print("=" * 70)
 
     # Login
@@ -1120,13 +1156,21 @@ def run_backtest(
         print("  No stock data available. Exiting.")
         return pd.DataFrame()
 
+    # Nifty data for RS ranking
+    nifty_rank = None
+    if RANK_METHOD == "rs_nifty":
+        print("\n  Loading Nifty data for RS ranking...")
+        nifty_rank = nifty_close if nifty_close is not None and not nifty_close.empty else None
+        if nifty_rank is None:
+            print("  WARNING: Nifty data unavailable, falling back to momentum ranking")
+
     # =================================================================
     # PASS 2: Day-by-day portfolio simulation
     # =================================================================
-    print(f"\n--- PASS 2: Portfolio simulation ({len(stock_data):,} stocks) ---\n")
+    print(f"\n--- PASS 2: Portfolio simulation ({len(stock_data):,} stocks) | Rank: {RANK_METHOD.upper()} ---\n")
 
     t1 = time.time()
-    all_trades, equity_curve = backtest_portfolio(stock_data)
+    all_trades, equity_curve = backtest_portfolio(stock_data, nifty_rank)
     sim_elapsed = (time.time() - t1) / 60
 
     print(f"  Pass 2 done. {len(all_trades):,} trades in {sim_elapsed:.1f} min")
