@@ -63,6 +63,7 @@ NIFTY_TOKEN          = "99926000"          # Nifty 50 token on NSE
 RANK_METHOD          = "momentum"          # "roc" | "rs_nifty" | "near_ath" | "volume_surge" | "momentum"
 ROC_PERIOD           = 90                  # days for ROC and momentum calculation
 RS_RANK_PERIOD       = 90                  # days for RS vs Nifty ranking
+FRESH_HIGH_DAYS      = 200                 # skip stock if it touched ref high within this many bars
 
 CACHE_DIR            = "cache_near_high"
 MIN_DATA_DAYS        = 252                 # minimum bars needed
@@ -429,13 +430,28 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame | None:
         (d["EMA150"]> d["EMA200"])
     )
 
-    # Near-high conditions
+    # Near-high conditions (raw proximity)
     d["Near_1Y"]  = (d["close"] >= d["High_1Y"] * NEAR_HIGH_LOWER) & \
                     (d["close"] <= d["High_1Y"] * NEAR_HIGH_UPPER)
     d["Near_5Y"]  = (d["close"] >= d["High_5Y"] * NEAR_HIGH_LOWER) & \
                     (d["close"] <= d["High_5Y"] * NEAR_HIGH_UPPER)
     d["Near_ATH"] = (d["close"] >= d["ATH"]     * NEAR_HIGH_LOWER) & \
                     (d["close"] <= d["ATH"]      * NEAR_HIGH_UPPER)
+
+    # Fresh-high filter: exclude if stock already touched ref high within last FRESH_HIGH_DAYS bars
+    # A "touch" means bar high >= the ref high value (shift(1) avoids look-ahead using today's rolling high)
+    touched_1Y  = (d["high"] >= d["High_1Y"].shift(1)).fillna(False)
+    touched_5Y  = (d["high"] >= d["High_5Y"].shift(1)).fillna(False)
+    touched_ATH = (d["high"] >= d["ATH"].shift(1)).fillna(False)
+
+    d["Touched_1Y_Recent"]  = touched_1Y.rolling(FRESH_HIGH_DAYS, min_periods=1).sum() > 0
+    d["Touched_5Y_Recent"]  = touched_5Y.rolling(FRESH_HIGH_DAYS, min_periods=1).sum() > 0
+    d["Touched_ATH_Recent"] = touched_ATH.rolling(FRESH_HIGH_DAYS, min_periods=1).sum() > 0
+
+    # Override: near-high only valid if the high hasn't been touched recently
+    d["Near_1Y"]  = d["Near_1Y"]  & ~d["Touched_1Y_Recent"]
+    d["Near_5Y"]  = d["Near_5Y"]  & ~d["Touched_5Y_Recent"]
+    d["Near_ATH"] = d["Near_ATH"] & ~d["Touched_ATH_Recent"]
 
     d["Near_High"] = d["Near_1Y"] | d["Near_5Y"] | d["Near_ATH"]
     d["Signal"]    = d["EMA_Aligned"] & d["Near_High"]
