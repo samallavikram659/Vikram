@@ -803,6 +803,35 @@ def performance_report(
                  / cnt * 100)
         print(f"    {ht:<6}: {cnt:4d} trades  avg {avg_p:>+6.1f}%  WR {wr:5.1f}%")
 
+    # ---- CAGR ----
+    if equity_history and len(equity_history) > 1:
+        eq_df_cagr = pd.DataFrame(equity_history)
+        first_date = pd.Timestamp(eq_df_cagr["date"].iloc[0])
+        last_date  = pd.Timestamp(eq_df_cagr["date"].iloc[-1])
+        years = (last_date - first_date).days / 365.25
+        if years > 0 and final_equity > 0:
+            cagr = (final_equity / INITIAL_CAPITAL) ** (1 / years) - 1
+            print(f"\n  CAGR               : {cagr * 100:>11.2f}%  (over {years:.1f} years)")
+
+    # ---- CALENDAR YEAR RETURNS ----
+    if equity_history and len(equity_history) > 1:
+        eq_yr = pd.DataFrame(equity_history)
+        eq_yr["date"] = pd.to_datetime(eq_yr["date"])
+        eq_yr["Year"] = eq_yr["date"].dt.year
+        years_list = sorted(eq_yr["Year"].unique())
+        print(f"\n  CALENDAR YEAR RETURNS:")
+        print(f"    {'Year':<6} {'Start Equity':>14} {'End Equity':>14} {'Return':>10} {'Max DD':>10}")
+        print(f"    {'─' * 58}")
+        for yr in years_list:
+            yr_data = eq_yr[eq_yr["Year"] == yr]
+            yr_start = yr_data["equity"].iloc[0]
+            yr_end   = yr_data["equity"].iloc[-1]
+            yr_ret   = (yr_end - yr_start) / yr_start * 100
+            yr_peak  = yr_data["equity"].cummax()
+            yr_dd    = ((yr_data["equity"].values - yr_peak.values) / yr_peak.values * 100).min()
+            bar = "+" * min(20, int(abs(yr_ret) / 5)) if yr_ret >= 0 else "-" * min(20, int(abs(yr_ret) / 5))
+            print(f"    {yr:<6} Rs {yr_start:>12,.0f} Rs {yr_end:>12,.0f} {yr_ret:>+9.2f}% {yr_dd:>+9.2f}%  {bar}")
+
     print(f"\n  MONTHLY P&L BREAKDOWN:")
     monthly = trades_df.groupby("Entry_Month")["PnL_Rs"].sum()
     for m, pnl in monthly.items():

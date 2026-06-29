@@ -955,6 +955,33 @@ def performance_report(
                  / cnt * 100)
         print(f"    {st:<30}: {cnt:4d} trades  avg {avg_p:>+6.1f}%  WR {wr:5.1f}%")
 
+    # ---- CAGR ----
+    if not equity_curve_df.empty and len(equity_curve_df) > 1:
+        first_date = equity_curve_df["Date"].iloc[0]
+        last_date  = equity_curve_df["Date"].iloc[-1]
+        years = (last_date - first_date).days / 365.25
+        if years > 0 and final_equity > 0:
+            cagr = (final_equity / INITIAL_CAPITAL) ** (1 / years) - 1
+            print(f"\n  CAGR               : {cagr * 100:>11.2f}%  (over {years:.1f} years)")
+
+    # ---- CALENDAR YEAR RETURNS ----
+    if not equity_curve_df.empty:
+        print(f"\n  CALENDAR YEAR RETURNS:")
+        eq = equity_curve_df.copy()
+        eq["Year"] = eq["Date"].dt.year
+        years_list = sorted(eq["Year"].unique())
+        print(f"    {'Year':<6} {'Start Equity':>14} {'End Equity':>14} {'Return':>10} {'Max DD':>10}")
+        print(f"    {'─' * 58}")
+        for yr in years_list:
+            yr_data = eq[eq["Year"] == yr]
+            yr_start = yr_data["Equity"].iloc[0]
+            yr_end   = yr_data["Equity"].iloc[-1]
+            yr_ret   = (yr_end - yr_start) / yr_start * 100
+            yr_peak  = yr_data["Equity"].cummax()
+            yr_dd    = ((yr_data["Equity"].values - yr_peak.values) / yr_peak.values * 100).min()
+            bar = "+" * min(20, int(abs(yr_ret) / 5)) if yr_ret >= 0 else "-" * min(20, int(abs(yr_ret) / 5))
+            print(f"    {yr:<6} Rs {yr_start:>12,.0f} Rs {yr_end:>12,.0f} {yr_ret:>+9.2f}% {yr_dd:>+9.2f}%  {bar}")
+
     print(f"\n  MONTHLY P&L BREAKDOWN:")
     net_abs = max(abs(net_pnl), 1)
     monthly = trades_df.groupby("Entry_Month")["PnL_Rs"].sum()
