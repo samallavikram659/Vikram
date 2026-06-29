@@ -2,7 +2,7 @@
 =============================================================================
 NEAR HIGH + OLIVER KELL COMBINED BACKTEST  --  PORTFOLIO MODE
 =============================================================================
-UNIVERSE  : All NSE EQ-series stocks (~2500 from Angel One scrip master)
+UNIVERSE  : Nifty 500 stocks (default) or All NSE EQ-series (~2500)
             Excludes: ETFs, Liquid Funds, Bonds, Index Funds
 
 PORTFOLIO : INITIAL_CAPITAL = Rs 1,00,000 (1 lakh)
@@ -91,6 +91,176 @@ ETF_PATTERNS = [
 def is_etf(name: str) -> bool:
     n = name.upper()
     return any(p in n for p in ETF_PATTERNS)
+
+# =============================================================================
+# NIFTY 500 UNIVERSE (Nifty50 + NiftyNext50 + Midcap150 + Smallcap250)
+# Updated list of ~500 NSE trading symbols for focused backtesting
+# =============================================================================
+NIFTY_500 = [
+    # --- Nifty 50 ---
+    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "HINDUNILVR", "ITC",
+    "SBIN", "BAJFINANCE", "BHARTIARTL", "KOTAKBANK", "LT", "HCLTECH",
+    "AXISBANK", "ASIANPAINT", "MARUTI", "SUNPHARMA", "TITAN", "ULTRACEMCO",
+    "WIPRO", "ONGC", "NTPC", "TECHM", "POWERGRID", "NESTLEIND", "TATAMOTORS",
+    "ADANIENT", "ADANIPORTS", "JSWSTEEL", "TATASTEEL", "BAJAJFINSV",
+    "COALINDIA", "HINDALCO", "GRASIM", "CIPLA", "DRREDDY", "APOLLOHOSP",
+    "EICHERMOT", "HEROMOTOCO", "DIVISLAB", "TATACONSUM", "BPCL", "BRITANNIA",
+    "SHRIRAMFIN", "M&M", "BAJAJ-AUTO", "INDUSINDBK", "SBILIFE", "HDFCLIFE",
+    "LTIM", "TRENT", "BEL", "ETERNAL",
+    # --- Nifty Next 50 ---
+    "ADANIPOWER", "DMART", "VEDL", "HAL", "HINDZINC", "IOC", "ADANIGREEN",
+    "TVSMOTOR", "VBL", "ABB", "ADANIENSO", "CHOLAFIN", "DLF", "TORNTPHARM",
+    "LODHA", "MAXHEALTH", "INDIGO", "AMBUJACEM", "GODREJCP", "PIDILITIND",
+    "BOSCHLTD", "SIEMENS", "HAVELLS", "JINDALSTEL", "ICICIPRULI",
+    "ICICIGI", "DABUR", "MOTHERSON", "BANKBARODA", "PFC", "RECLTD",
+    "TATAPOWER", "CANBK", "NAUKRI", "MARICO", "ACC", "SRF", "COLPAL",
+    "PAGEIND", "OFSS", "MCDOWELL-N", "BERGEPAINT", "ATGL", "CONCOR",
+    "INDUSTOWER", "CGPOWER", "PGHH", "NHPC", "IRFC", "INDIANB",
+    # --- Nifty Midcap 150 ---
+    "FEDERALBNK", "SUZLON", "GICRE", "MCX", "BHEL", "POLYCAB", "PBFINTECH",
+    "IDFCFIRSTB", "HDFCAMC", "BHARATFORG", "AUROPHARMA", "LUPIN", "MFSL",
+    "PETRONET", "VOLTAS", "TATAELXSI", "OBEROIRLTY", "BALKRISIND",
+    "MPHASIS", "ASTRAL", "JUBLFOOD", "SOLARINDS", "MRF", "ABCAPITAL",
+    "PIIND", "PERSISTENT", "LTTS", "SAIL", "LICHSGFIN", "IRCTC",
+    "CUMMINSIND", "COROMANDEL", "IPCALAB", "ASHOKLEY", "BATAINDIA",
+    "KAJARIACER", "GLAND", "HONAUT", "AUBANK", "DIXON", "LALPATHLAB",
+    "KEI", "ESCORTS", "ALKEM", "MUTHOOTFIN", "NAVINFLUOR", "METROPOLIS",
+    "ZYDUSLIFE", "CROMPTON", "SUNDRMFAST", "BIOCON", "PRESTIGE", "TATACOMM",
+    "EXIDEIND", "SYNGENE", "APLAPOLLO", "CRISIL", "SUNTV", "SCHAEFFLER",
+    "THERMAX", "DELHIVERY", "ENDURANCE", "SONACOMS", "ATUL", "MSUMI",
+    "DEEPAKNTR", "GRINDWELL", "TORNTPOWER", "EMAMILTD", "JKCEMENT",
+    "CARBORUNIV", "RELAXO", "AJANTPHARM", "SUMICHEM", "PHOENIXLTD",
+    "KPITTECH", "BRIGADE", "FORTIS", "GLENMARK", "PFIZER",
+    "GMRAIRPORT", "SRIRAMFIN", "IIFL", "SUPREMEIND", "AIAENG", "TIMKEN",
+    "AAVAS", "WHIRLPOOL", "NATCOPHARM", "CDSL", "JBCHEPHARM", "ZEEL",
+    "NIACL", "PNBHOUSING", "LINDEINDIA", "CESC", "RADICO", "RBLBANK",
+    "MGL", "BANKINDIA", "TATACHEM", "CANFINHOME", "FINEORG", "SUNDARMFIN",
+    "AFFLE", "MANAPPURAM", "AMARAJABAT", "SHREECEM", "RAMCOCEM", "LAURUSLABS",
+    "NMDC", "APOLLOTYRE", "INDHOTEL", "GODREJPROP", "LODHA", "PVRINOX",
+    "ABBOTINDIA", "SANOFI", "GILLETTE", "ZOMATO", "JIOFIN", "PAYTM",
+    "POLICYBZR", "KAYNES", "LLOYDSME", "SONATSOFTW", "STARHEALTH",
+    "MAZDOCK", "COCHINSHIP", "GRSE", "DALBHARAT",
+    # --- Nifty Smallcap 250 ---
+    "IDBI", "IOB", "CENTRALBK", "UCOBANK", "MAHABANK", "J&KBANK",
+    "KTKBANK", "KARURVYSYA", "CUB", "DCBBANK", "EQUITAS", "UJJIVAN",
+    "CREDITACC", "SPANDANA", "MANAPPURAM", "PNBHOUSING", "AAVAS",
+    "HOMEFIRST", "APTUS", "REPCO", "CANARABNK",
+    "CGCL", "CHOLAHLDNG", "BSE", "CAMS", "KFINTECH", "ANGELONE",
+    "NYKAA", "CARTRADE", "EASEMYTRIP",
+    "HUDCO", "IRCON", "RVNL", "IREDA", "SJVN", "NLCINDIA", "NHPC",
+    "JSWENERGY", "TATAPOWER", "ADANIGREEN", "TORNTPOWER",
+    "POWERMECH", "KALPATPOWR", "KEC", "JYOTISTRUC",
+    "BAJAJELEC", "BLUESTARCO", "VOLTAS", "AMBER", "ELGIEQUIP",
+    "THERMAX", "CUMMINSIND", "KIRLOSENG", "TRITURBINE", "GREAVESCOT",
+    "MAHSEAMLES", "RATNAMANI", "GPPL", "GUJGASLTD",
+    "IGL", "GSPL", "GAIL", "OIL", "MRPL", "CHENNPETRO", "HINDPETRO",
+    "CASTROLIND", "GULFOILLUB", "GNFC", "GSFC", "CHAMBLFERT",
+    "DEEPAKFERT", "COROMANDEL", "RALLIS", "UPL", "PIIND",
+    "BAYERCROP", "DHANUKA", "SHARDACROP",
+    "ERIS", "GRANULES", "CAPLIPOINT", "STRIDES", "IPCA",
+    "LAURUS", "GLENMARK", "AUROPHARMA", "ALKEM",
+    "NATCOPHARM", "BIOCON", "SYNGENE", "THYROCARE", "POLYMED",
+    "MAXHEALTH", "MEDANTA", "RAINBOW", "NH", "KIMS", "YATHARTH",
+    "ASIANPAINT", "BERGEPAINT", "KANSAINER", "AKZOINDIA",
+    "CENTURYPLY", "GREENPANEL", "CERA", "KAJARIACER", "SHREECEM",
+    "ULTRACEMCO", "AMBUJACEM", "ACC", "JKCEMENT", "RAMCOCEM",
+    "JKLAKSHMI", "HEIDELBERG", "DALBHARAT", "STARCEMENT", "BIRLACORPN",
+    "JSWSTEEL", "TATASTEEL", "HINDALCO", "VEDL",
+    "NMDC", "NATIONALUM", "HINDCOPPER", "MOIL", "COALINDIA",
+    "WELCORP", "JINDALSAW", "APL",
+    "TATAMOTORS", "M&M", "MARUTI", "EICHERMOT", "HEROMOTOCO",
+    "BAJAJ-AUTO", "TVSMOTOR", "ASHOKLEY", "FORCEMOT", "ESCORTS",
+    "SONACOMS", "ENDURANCE", "SUNDRMFAST", "MOTHERSON",
+    "BOSCHLTD", "EXIDEIND", "AMARAJABAT", "CEATLTD", "APOLLOTYRE",
+    "BALKRISIND", "MRF", "JKTYRE",
+    "GRINDWELL", "CARBORUNIV", "SUPRAJIT", "SCHAEFFLER",
+    "SKFINDIA", "TIMKEN", "FIVESTAR",
+    "TITAN", "KALYANAJEW", "SENCO", "PCJEWELLER", "RAJESHEXPO",
+    "TASTYBITE", "EIDPARRY", "DALMIASUGAR", "BALRAMCHIN", "RENUKA",
+    "BRITANNIA", "NESTLEIND", "TATACONSUM", "HINDUNILVR", "ITC",
+    "COLPAL", "DABUR", "MARICO", "GODREJCP", "EMAMILTD",
+    "VBL", "CCL", "RADICO", "UBL", "MCDOWELL-N",
+    "JYOTHYLAB", "HATSUN", "HERITGFOOD", "BIKAJI", "GODFRYPHLP",
+    "VSTIND",
+    "DMART", "TRENT", "SHOPERSTOP", "VMART", "TITAN",
+    "PAGEIND", "LUXIND", "RUPA", "BATA",
+    "ZOMATO", "SWIGGY", "NYKAA", "DELHIVERY", "CARTRADE",
+    "INDIGO", "SPICEJET", "IRCTC",
+    "DLF", "GODREJPROP", "OBEROIRLTY", "PRESTIGE", "BRIGADE",
+    "PHOENIXLTD", "LODHA", "SOBHA", "SUNTECK", "MAHLIFE",
+    "KOLTEPATIL", "ANANTRAJ", "RAYMOND",
+    "LT", "LTIM", "LTTS", "HCLTECH", "WIPRO", "TECHM",
+    "INFY", "TCS", "MPHASIS", "PERSISTENT", "COFORGE",
+    "TATAELXSI", "KPITTECH", "CYIENT", "ECLERX",
+    "NAUKRI", "OFSS", "INTELLECT", "MASTEK", "SONATSOFTW",
+    "HAPPSTMNDS", "NEWGEN", "ROUTE", "LATENTVIEW", "TANLA",
+    "NETWORK18", "TV18BRDCST", "SUNTV", "PVRINOX", "ZEEL",
+    "STAR", "SAREGAMA", "TIPS",
+    "BHARTIARTL", "INDUSTOWER", "HFCL", "STLTECH", "RAILTEL",
+    "TTML", "ROUTE",
+    "HDFCLIFE", "SBILIFE", "ICICIPRULI", "ICICIGI", "GICRE",
+    "NIACL", "STARHEALTH", "MAXFIN", "GODIGIT",
+    "ISEC", "HDFCAMC", "MFSL", "CAMS", "KFINTECH",
+    "BSE", "MCX", "CDSL", "ANGELONE",
+    "BAJFINANCE", "BAJAJFINSV", "SHRIRAMFIN", "CHOLAFIN",
+    "M&MFIN", "MANAPPURAM", "MUTHOOTFIN", "IIFL", "POONAWALLA",
+    "ABCAPITAL", "LICHSGFIN", "PFC", "RECLTD", "IRFC",
+    "HUDCO", "CANFINHOME", "AAVAS", "HOMEFIRST", "APTUS",
+    "FEDERALBNK", "IDFCFIRSTB", "BANDHANBNK", "RBLBANK",
+    "AUBANK", "EQUITAS", "UJJIVAN", "CREDITACC", "DCBBANK",
+    "IDBI", "IOB", "CENTRALBK", "INDIANB", "MAHABANK",
+    "BANKINDIA", "UCOBANK", "BANKBARODA", "CANBK", "PNB", "SBIN",
+    "KOTAKBANK", "HDFCBANK", "ICICIBANK", "AXISBANK", "INDUSINDBK",
+    "J&KBANK", "KTKBANK", "KARURVYSYA", "CUB",
+    "POWERGRID", "NTPC", "NHPC", "SJVN", "NLCINDIA",
+    "TATAPOWER", "JSWENERGY", "ADANIGREEN", "ADANIPOWER", "TORNTPOWER",
+    "BHEL", "SIEMENS", "ABB", "CGPOWER", "HAVELLS", "POLYCAB",
+    "SUZLON", "KAYNES", "DIXON", "AFFLE",
+    "MAZDOCK", "COCHINSHIP", "GRSE", "BDL", "BEL", "HAL",
+    "PARAS", "SOLARINDS", "DATAPATTNS",
+    "BPCL", "IOC", "HINDPETRO", "ONGC", "OIL", "GAIL",
+    "PETRONET", "IGL", "MGL", "ATGL",
+    "CONCOR", "IRCON", "RVNL", "IRCTC",
+    "GODREJIND", "PIDILITIND", "SRF", "ATUL", "DEEPAKNTR",
+    "NAVINFLUOR", "FINEORG", "CLEAN", "GALAXYSURF",
+    "LALPATHLAB", "METROPOLIS", "FORTIS",
+    "ICRA", "CRISIL",
+    "MMTC", "MOIL", "NMDC", "NFL", "RCF",
+    "FACT", "RITES", "NBCC", "NCC", "BDL",
+    "ITI", "RAILTEL", "IRCON", "RVNL",
+    "PTC", "SJVN", "NHPC", "POWERGRID", "NTPC",
+    "TATACHEM", "GRASIM", "HINDALCO", "JSWSTEEL", "TATASTEEL",
+    "APLAPOLLO", "ASTRAL", "SUPREMEIND",
+    "KEI", "POLYCAB", "HAVELLS", "CROMPTON", "WHIRLPOOL",
+    "BLUESTARCO", "VOLTAS", "BAJAJELEC", "AMBER",
+    "DIXON", "KAYNES", "HONAUT",
+    "RELIANCE", "ADANIENT", "ADANIPORTS", "ADANIPOWER", "ADANIGREEN",
+    "ADANIENSO", "ATGL",
+    # --- Additional Smallcap / Midcap stocks to complete ~500 ---
+    "AARTI", "AARTIIND", "ABSLAMC", "ALOKINDS", "ANANDRATHI", "APARINDS",
+    "ARE&M", "ARIES", "ASAHIINDIA", "ASTRAZEN", "BEML", "BLUEDART",
+    "BORORENEW", "BSOFT", "CAMPUS", "CAPLIN", "CENTURYTEX", "CHALET",
+    "CHAMBAL", "CHOICEIN", "CMSINFO", "CONCORDBIO", "CRAFTSMAN",
+    "DBCORP", "DCMSHRIRAM", "DELTACORP", "DEVYANI", "EDELWEISS", "ELECON",
+    "ENGINERSIN", "FDC", "FINCABLES", "FINPIPE", "FLUOROCHEM",
+    "GARFIBRES", "GESHIP", "GHCL", "GMDCLTD", "GOCOLORS", "GODREJAGRO",
+    "GOODYEAR", "GRPLTD", "GUJALKALI", "HBLPOWER", "HGS", "HIKAL",
+    "HINDWAREAP", "IBULHSGFIN", "IFBIND", "INDIAMART", "INDIGOPNTS",
+    "INOXWIND", "JAMNAAUTO", "JBM", "JMFINANCIL", "JSL", "JTEKTINDIA",
+    "JUBLINGREA", "JUBLPHARMA", "JUSTDIAL", "KENNAMET", "KNRCON",
+    "KPRMILL", "KRBL", "KRSNAA", "LAXMIMACH", "LEMONTREE", "MAPMYINDIA",
+    "MAXIND", "MIDHANI", "MINDACORP", "MOTILALOFS", "NESCO", "NILKAMAL",
+    "OLECTRA", "ORIENTELEC", "PIRAMAL", "POLYMED", "PPLPHARMA",
+    "PRINCEPIPE", "PRSMJOHNSN", "QUESS", "REDINGTON", "ROSSARI",
+    "SAPPHIRE", "SHILPAMED", "SHYAMMETL", "SIS", "SOUTHBANK",
+    "SUDARSCHEM", "SWANENERGY", "SYMPHONY", "TARSONS", "TEAMLEASE",
+    "TECHNOE", "TEGA", "TIINDIA", "TRIDENT", "TTKPRESTIG", "UFLEX",
+    "UTIAMC", "VAIBHAVGBL", "VARUN", "VIPIND", "VRLLOG", "WABAG",
+    "WESTLIFE", "WOCKPHARMA", "WONDERLA", "ZENSARTECH",
+]
+
+# De-duplicate the list (some stocks appear in multiple sub-indices)
+NIFTY_500 = sorted(set(NIFTY_500))
 
 # =============================================================================
 # AUTHENTICATION
@@ -806,7 +976,7 @@ def performance_report(
 # MAIN RUNNER
 # =============================================================================
 def run_backtest(
-    use_all_nse: bool = True,
+    use_all_nse: bool = False,
     tickers: list[str] | None = None,
     max_stocks: int | None = None,
 ):
@@ -834,14 +1004,33 @@ def run_backtest(
     # Decide universe
     if use_all_nse and tickers is None:
         universe = list(sym_map.items())
-    else:
+        print(f"  Universe: ALL NSE-EQ stocks ({len(universe):,})")
+    elif tickers is not None:
+        # Filter sym_map to only include stocks in the provided tickers list
         universe = []
-        for t in (tickers or []):
+        not_found = []
+        for t in tickers:
             tok = resolve_ticker(t, sym_map)
             if tok:
                 universe.append((t, tok))
             else:
-                print(f"  WARNING: {t} not found in symbol map")
+                not_found.append(t)
+        if not_found:
+            print(f"  WARNING: {len(not_found)} tickers not found in symbol map: {not_found[:20]}{'...' if len(not_found) > 20 else ''}")
+        print(f"  Universe: {len(universe):,} stocks (from provided tickers list)")
+    else:
+        # Default: use NIFTY_500
+        universe = []
+        not_found = []
+        for t in NIFTY_500:
+            tok = resolve_ticker(t, sym_map)
+            if tok:
+                universe.append((t, tok))
+            else:
+                not_found.append(t)
+        if not_found:
+            print(f"  WARNING: {len(not_found)} NIFTY_500 tickers not found: {not_found[:20]}{'...' if len(not_found) > 20 else ''}")
+        print(f"  Universe: NIFTY 500 ({len(universe):,} stocks resolved)")
 
     if max_stocks is not None:
         universe = universe[:max_stocks]
@@ -952,8 +1141,11 @@ def run_backtest(
 # ENTRY POINT
 # =============================================================================
 if __name__ == "__main__":
-    # Default: all NSE EQ stocks
-    run_backtest(use_all_nse=True, max_stocks=None)
+    # Default: Nifty 500 stocks only (faster, focused on quality universe)
+    run_backtest(use_all_nse=False, tickers=NIFTY_500)
+
+    # Example: all NSE EQ stocks (~2500)
+    # run_backtest(use_all_nse=True, max_stocks=None)
 
     # Example: specific tickers only
     # run_backtest(use_all_nse=False, tickers=["RELIANCE", "TCS", "INFY", "HDFCBANK"])
