@@ -61,6 +61,8 @@ MIN_HOLD_DAYS        = 2               # bars before switching to tighter EMA st
 RS_LOOKBACK          = 20              # days for relative-strength calculation
 
 CACHE_DIR            = "cache_near_high"   # reuse same cache as oliver combined backtest
+CACHE_MAX_AGE_HOURS  = 168             # use cache up to 7 days old (avoids re-fetching)
+SKIP_API             = True            # True = use cache only, skip stocks not in cache (FAST)
 MIN_DATA_DAYS        = 252             # minimum bars needed per stock
 
 # =============================================================================
@@ -231,14 +233,13 @@ def compute_indicators(d: pd.DataFrame, nifty_close=None) -> pd.DataFrame | None
     else:
         d["RS_Leader"] = True
 
-    # Mini-base (ATR contraction)
-    atr_series = d["ATR14"].values
-    mini_base = [False] * len(d)
-    for i in range(MINI_BASE_BARS, len(d)):
-        window = atr_series[i - MINI_BASE_BARS + 1: i + 1]
-        contracting = sum(1 for j in range(1, len(window)) if window[j] < window[j-1])
-        mini_base[i] = contracting >= MINI_BASE_MIN
-    d["Mini_Base"] = mini_base
+    # Mini-base: vectorized ATR contraction detection (replaces slow Python loop)
+    # Count bars where ATR fell vs previous bar within a rolling MINI_BASE_BARS window
+    atr_declining = d["ATR14"].diff() < 0
+    d["Mini_Base"] = (
+        atr_declining.rolling(MINI_BASE_BARS - 1, min_periods=MINI_BASE_BARS - 1)
+        .sum() >= MINI_BASE_MIN
+    ).fillna(False)
 
     # Swing high
     d["Swing_Hi10"] = d["high"].rolling(10).max().shift(1)
@@ -591,15 +592,18 @@ def run_backtest(use_all_nse: bool = True, tickers: list[str] | None = None,
         # Try cache
         if os.path.exists(cache_file):
             age_h = (time.time() - os.path.getmtime(cache_file)) / 3600
-            if age_h < 24:
+            if age_h < CACHE_MAX_AGE_HOURS:
                 try:
                     with open(cache_file, "rb") as f:
                         df = pickle.load(f)
                 except Exception:
                     df = None
 
-        # Fetch from API if not cached
+        # Fetch from API if not cached (skip if SKIP_API=True)
         if df is None:
+            if SKIP_API:
+                skipped += 1
+                continue
             df = fetch_ohlcv(smart, sym_map[symbol])
             if df is not None:
                 with open(cache_file, "wb") as f:
