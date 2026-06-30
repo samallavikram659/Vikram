@@ -11,8 +11,10 @@ UNIVERSE  : Nifty 500 stocks (default) or All NSE EQ-series (~2500)
 
 PORTFOLIO : INITIAL_CAPITAL = Rs 1,00,000 (1 lakh)
             MAX_POSITIONS   = 3 (max 3 stocks held at any time)
-            Equal allocation: capital / 3 per position (~33,333 each)
-            Capital recycled on exit
+            Compounding allocation: current total equity / 3 per position,
+              recomputed before every entry (mark-to-market cash + open
+              positions). Position size grows with profits, shrinks with
+              drawdowns -- capital recycled on exit.
 
 SIMULATION: Two-pass approach
             Pass 1 - Fetch data + compute indicators for ALL stocks
@@ -718,6 +720,19 @@ def backtest_portfolio(stock_data: dict[str, pd.DataFrame], nifty_close=None) ->
         available_slots = MAX_POSITIONS - len(open_positions)
 
         if available_slots > 0:
+            # Mark open positions to market to get current total equity,
+            # so position sizing compounds with account growth/drawdown.
+            open_positions_value = 0.0
+            for symbol, pos in open_positions.items():
+                row = stock_row_lookup.get(symbol, {}).get(dt)
+                if row is not None:
+                    open_positions_value += pos["shares"] * float(row["close"])
+                else:
+                    open_positions_value += pos["allocated_capital"]
+
+            current_equity = cash + open_positions_value
+            position_size = current_equity / MAX_POSITIONS
+
             entry_candidates = []
 
             for symbol, row_dict in stock_row_lookup.items():
@@ -763,8 +778,8 @@ def backtest_portfolio(stock_data: dict[str, pd.DataFrame], nifty_close=None) ->
                 sp = round(ep * (1 - STOP_LOSS_PCT), 2)
                 tp = round(cand["ref_high"] * (1 + TARGET_ABOVE_HIGH_PCT), 2)
 
-                # Allocate capital for this position
-                alloc = min(PER_POSITION_CAPITAL, cash)
+                # Allocate capital for this position (compounds with current equity)
+                alloc = min(position_size, cash)
                 if alloc < 1.0 or ep <= 0:
                     continue  # not enough capital
 
@@ -917,7 +932,7 @@ def performance_report(
     print(f"  PORTFOLIO CONFIGURATION:")
     print(f"  Initial Capital    : Rs {INITIAL_CAPITAL:>14,.0f}")
     print(f"  Max Positions      : {MAX_POSITIONS:>12d}")
-    print(f"  Per-Position Size  : Rs {PER_POSITION_CAPITAL:>14,.0f}")
+    print(f"  Starting Per-Position Size: Rs {PER_POSITION_CAPITAL:>8,.0f}  (compounds with equity thereafter)")
 
     print(f"\n  PERFORMANCE SUMMARY:")
     print(f"  Final Equity       : Rs {final_equity:>14,.0f}")
@@ -1030,7 +1045,7 @@ def run_backtest(
     print(f"  Extension mult: {EXTENSION_MULT}x ATR  |  Min hold: {MIN_HOLD_DAYS} bars")
     print(f"  Lookback: {LOOKBACK_DAYS} days  |  Fetch: {FETCH_YEARS} years")
     print(f"  Capital: Rs {INITIAL_CAPITAL:,.0f}  |  Max Positions: {MAX_POSITIONS}")
-    print(f"  Per-Position: Rs {PER_POSITION_CAPITAL:,.0f}")
+    print(f"  Per-Position (start): Rs {PER_POSITION_CAPITAL:,.0f}  (compounds with equity)")
     print(f"  Rank Method: {RANK_METHOD.upper()}  |  ROC Period: {ROC_PERIOD} days")
     print("=" * 70)
 
