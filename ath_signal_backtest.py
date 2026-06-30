@@ -257,6 +257,8 @@ def fetch_batch_yf(symbols: list, years: int = FETCH_YEARS) -> dict:
 
             df = df[["open", "high", "low", "close", "volume"]]
             df.index = pd.to_datetime(df.index)
+            if df.index.tz is not None:
+                df.index = df.index.tz_convert(None)
             df = df[~df.index.duplicated(keep="last")].sort_index()
             df.dropna(subset=["close"], inplace=True)
             df = df[(df["close"] > 0) & (df["volume"] >= 0)]
@@ -280,6 +282,8 @@ def fetch_nifty_close(years: int = FETCH_YEARS) -> pd.Series | None:
             return None
         close = raw["Close"].squeeze()
         close.index = pd.to_datetime(close.index)
+        if close.index.tz is not None:
+            close.index = close.index.tz_convert(None)
         close.name = "close"
         return close
     except Exception:
