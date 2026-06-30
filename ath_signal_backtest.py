@@ -576,6 +576,41 @@ def print_report(trades_df: pd.DataFrame):
     print(f"  Best Trade   : {best['Symbol']:>10}  Rs {best['PnL_Rs']:>8,.0f}  ({best['PnL_Pct']:.1f}%)")
     print(f"  Worst Trade  : {worst['Symbol']:>10}  Rs {worst['PnL_Rs']:>8,.0f}  ({worst['PnL_Pct']:.1f}%)")
 
+    # ---- Capital requirement analysis ----
+    entry_dates = pd.to_datetime(trades_df["Entry_Date"])
+    exit_dates  = pd.to_datetime(trades_df["Exit_Date"])
+    invested    = trades_df["Invested_Rs"]
+
+    events = pd.concat([
+        pd.DataFrame({"date": entry_dates, "delta": invested.values}),
+        pd.DataFrame({"date": exit_dates + pd.Timedelta(days=1), "delta": -invested.values}),
+    ])
+    events = events.groupby("date")["delta"].sum().sort_index()
+    capital_tied_up = events.cumsum()
+    full_range = pd.date_range(capital_tied_up.index.min(), capital_tied_up.index.max(), freq="D")
+    capital_daily = capital_tied_up.reindex(full_range, method="ffill").fillna(0)
+
+    avg_capital_tied_up  = capital_daily.mean()
+    peak_capital_tied_up = capital_daily.max()
+    peak_capital_date    = capital_daily.idxmax()
+    avg_concurrent_pos   = avg_capital_tied_up / PER_TRADE_CAPITAL
+    peak_concurrent_pos  = peak_capital_tied_up / PER_TRADE_CAPITAL
+
+    entry_month       = entry_dates.dt.to_period("M")
+    monthly_deployed  = invested.groupby(entry_month).sum()
+    avg_monthly_dep   = monthly_deployed.mean()
+    peak_monthly_dep  = monthly_deployed.max()
+    peak_monthly_per  = monthly_deployed.idxmax()
+
+    print()
+    print("  CAPITAL REQUIREMENT:")
+    print(f"  Avg Concurrent Positions : {avg_concurrent_pos:>8.1f}")
+    print(f"  Peak Concurrent Positions: {peak_concurrent_pos:>8.0f}  (on {peak_capital_date.date()})")
+    print(f"  Avg Capital Tied Up      : Rs {avg_capital_tied_up:>10,.0f}  (capital you need on hand, on average)")
+    print(f"  Peak Capital Tied Up     : Rs {peak_capital_tied_up:>10,.0f}  (worst-case capital needed, on {peak_capital_date.date()})")
+    print(f"  Avg New Capital/Month    : Rs {avg_monthly_dep:>10,.0f}  (avg fresh money deployed into new trades)")
+    print(f"  Peak New Capital/Month   : Rs {peak_monthly_dep:>10,.0f}  (in {peak_monthly_per})")
+
     print()
     print("  EXIT REASON BREAKDOWN:")
     for reason, grp in trades_df.groupby("Exit_Reason"):
