@@ -297,6 +297,13 @@ def compute_indicators(d: pd.DataFrame, nifty_close=None) -> pd.DataFrame | None
     if len(d) < MIN_DATA_DAYS:
         return None
 
+    # Normalize to timezone-naive (cached files may have UTC+05:30 from yfinance)
+    if d.index.tz is not None:
+        d.index = d.index.tz_convert(None)
+    if nifty_close is not None and nifty_close.index.tz is not None:
+        nifty_close = nifty_close.copy()
+        nifty_close.index = nifty_close.index.tz_convert(None)
+
     # EMAs
     for span in [5, 10, 20, 50, 150, 200]:
         d[f"EMA{span}"] = d["close"].ewm(span=span, adjust=False).mean()
