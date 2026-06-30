@@ -1,7 +1,11 @@
 """
 =============================================================================
-NEAR HIGH + OLIVER KELL COMBINED BACKTEST  --  PORTFOLIO MODE
+NEAR HIGH + OLIVER KELL COMBINED BACKTEST  --  PORTFOLIO MODE  (Yahoo Finance)
 =============================================================================
+DATA      : Yahoo Finance (yfinance) — no login required.
+            NSE universe from NSE public CSV (~2500 EQ stocks).
+            Batch downloads 50 stocks per request (~2-3 min first run).
+
 UNIVERSE  : Nifty 500 stocks (default) or All NSE EQ-series (~2500)
             Excludes: ETFs, Liquid Funds, Bonds, Index Funds
 
@@ -40,23 +44,17 @@ import time
 import datetime
 import warnings
 import requests
+from io import StringIO
 
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
 warnings.filterwarnings("ignore")
-
-from SmartApi import SmartConnect
-import pyotp
 
 # =============================================================================
 # CONFIGURATION - EDIT THESE VALUES
 # =============================================================================
-ANGEL_API_KEY        = "Tp7PJMIc"
-ANGEL_CLIENT_ID      = "S63068620"
-ANGEL_CLIENT_PIN     = "4098"
-ANGEL_TOTP_SECRET    = "KVTELUFGR33YCPQUKO3ZSL4NMA"
-
 INITIAL_CAPITAL      = 100_000               # Rs 1 lakh
 MAX_POSITIONS        = 3                     # max concurrent positions
 STOP_LOSS_PCT        = 0.05                  # 5% stop loss
@@ -65,7 +63,6 @@ NEAR_HIGH_LOWER      = 0.90                  # 10% below high (lower bound)
 NEAR_HIGH_UPPER      = 0.95                  # 5% below high (upper bound)
 LOOKBACK_DAYS        = 365                   # backtest window in days
 FETCH_YEARS          = 6                     # years of history to fetch
-NIFTY_TOKEN          = "99926000"            # Nifty 50 token on NSE
 RANK_METHOD          = "momentum"            # "roc" | "rs_nifty" | "near_ath" | "volume_surge" | "momentum"
 ROC_PERIOD           = 90                    # days for ROC and momentum calculation
 RS_RANK_PERIOD       = 90                    # days for RS vs Nifty ranking
@@ -78,8 +75,11 @@ EXTENSION_MULT       = 3.0                   # ATR multiplier for extension exit
 MIN_HOLD_DAYS        = 2                     # hold for at least this many bars before trailing stop
 RS_LOOKBACK          = 20                    # days for relative-strength calculation
 
-CACHE_DIR            = "cache_near_high"
-MIN_DATA_DAYS        = 252                   # minimum bars needed
+CACHE_DIR            = "cache_near_high_yf"     # primary cache dir for this script
+CACHE_FALLBACK_DIRS  = ["cache_ath_yf"]         # reuse data fetched by ath_signal_backtest.py
+CACHE_MAX_AGE_HOURS  = 168                      # use cache up to 7 days old
+MIN_DATA_DAYS        = 252                      # minimum bars needed
+BATCH_SIZE           = 50                       # stocks per yfinance batch request
 
 # Derived
 PER_POSITION_CAPITAL = INITIAL_CAPITAL / MAX_POSITIONS  # ~33,333 per slot
@@ -267,157 +267,119 @@ NIFTY_500 = [
 NIFTY_500 = sorted(set(NIFTY_500))
 
 # =============================================================================
-# AUTHENTICATION
+# NSE UNIVERSE - Yahoo Finance
 # =============================================================================
-def _fix_totp(raw: str) -> str:
-    s = raw.strip().upper().replace(" ", "").replace("-", "")
-    pad = (8 - len(s) % 8) % 8
-    return s + "=" * pad
-
-
-def angel_login() -> SmartConnect:
-    totp_fixed = _fix_totp(ANGEL_TOTP_SECRET)
-    obj = SmartConnect(api_key=ANGEL_API_KEY)
-    otp = pyotp.TOTP(totp_fixed).now()
-    secs_left = 30 - datetime.datetime.now().second % 30
-    print(f"  OTP: {otp}  (valid ~{secs_left}s)")
-    data = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_CLIENT_PIN, otp)
-    if not isinstance(data, dict):
-        raise RuntimeError(f"Unexpected login response: {data}")
-    status = data.get("status")
-    if status is True or str(status).lower() == "true":
-        jwt = str(data.get("data", {}).get("jwtToken", ""))[:30]
-        print(f"  JWT: {jwt}...")
-        return obj
-    raise RuntimeError(
-        f"Login failed: {data.get('errorcode', '?')} | {data.get('message', str(data))}"
-    )
-
-# =============================================================================
-# NSE SYMBOL MAP
-# =============================================================================
-def get_nse_symbol_map() -> dict:
-    """Return {symbol -> token} for all NSE-EQ stocks, excluding ETFs."""
-    cache_path = os.path.join(CACHE_DIR, "_symbol_map.pkl")
-    if os.path.exists(cache_path):
-        age_h = (time.time() - os.path.getmtime(cache_path)) / 3600
+def get_nse_universe(cache_file: str = "nse_universe_yf.pkl") -> list:
+    """Return list of NSE EQ symbols. Downloads from NSE public CSV with 24h cache."""
+    if os.path.exists(cache_file):
+        age_h = (time.time() - os.path.getmtime(cache_file)) / 3600
         if age_h < 24:
-            with open(cache_path, "rb") as fh:
-                m = pickle.load(fh)
-            m = {k: v for k, v in m.items() if not is_etf(k)}
-            print(f"  Symbol map: {len(m):,} stocks (from cache, {age_h:.1f}h old)")
-            return m
+            with open(cache_file, "rb") as fh:
+                symbols = pickle.load(fh)
+            print(f"  NSE universe: {len(symbols):,} symbols (cache, {age_h:.1f}h old)")
+            return symbols
 
-    print("  Downloading Angel One scrip master...")
-    url = ("https://margincalculator.angelbroking.com"
-           "/OpenAPI_File/files/OpenAPIScripMaster.json")
-    resp = requests.get(url, timeout=60)
-    df = pd.DataFrame(resp.json())
-    nse = df[df["exch_seg"] == "NSE"]
-    eq = nse[nse["symbol"].str.endswith("-EQ", na=False)].copy()
-    eq["sym"] = eq["symbol"].str.replace("-EQ", "", regex=False).str.strip()
-    raw_map = dict(zip(eq["sym"], eq["token"]))
-    filtered = {k: v for k, v in raw_map.items() if not is_etf(k)}
-    print(f"  NSE-EQ total: {len(raw_map):,}  after ETF exclusion: {len(filtered):,}")
-    with open(cache_path, "wb") as fh:
-        pickle.dump(filtered, fh)
-    return filtered
+    try:
+        url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+        resp = requests.get(
+            url, timeout=30,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        )
+        resp.raise_for_status()
+        eq_df = pd.read_csv(StringIO(resp.text))
+        if "SYMBOL" not in eq_df.columns:
+            raise ValueError("SYMBOL column missing")
 
+        symbols = [str(s).strip() for s in eq_df["SYMBOL"] if not is_etf(str(s))]
+        symbols = sorted(set(symbols))
 
-def resolve_ticker(symbol: str, sym_map: dict) -> str | None:
-    """Return Angel One token for a symbol, trying common suffixes."""
-    for candidate in [symbol, symbol.upper(), symbol + "-EQ"]:
-        if candidate in sym_map:
-            return sym_map[candidate]
-    return None
+        with open(cache_file, "wb") as fh:
+            pickle.dump(symbols, fh)
+        print(f"  NSE universe: {len(symbols):,} symbols (from NSE public CSV)")
+        return symbols
+
+    except Exception as e:
+        print(f"  WARNING: NSE CSV unavailable ({e}). Using NIFTY_500 fallback.")
+        return list(NIFTY_500)
+
 
 # =============================================================================
-# CHUNKED OHLCV FETCH
+# BATCH OHLCV FETCH - Yahoo Finance
 # =============================================================================
-def fetch_daily_ohlcv(
-    obj: SmartConnect,
-    token: str,
-    symbol: str,
-    from_date: str,
-    to_date: str,
-    max_retries: int = 3,
-) -> pd.DataFrame:
-    """Fetch daily OHLCV in 300-day chunks to handle API limits."""
-    rows = []
-    cur = pd.Timestamp(from_date)
-    end = pd.Timestamp(to_date)
+def fetch_batch_yf(symbols: list, years: int = FETCH_YEARS) -> dict:
+    """Download adjusted OHLCV for a batch of NSE symbols via yfinance."""
+    today = datetime.date.today()
+    start = (today - datetime.timedelta(days=int(years * 365.25))).strftime("%Y-%m-%d")
+    end   = today.strftime("%Y-%m-%d")
 
-    while cur <= end:
-        chunk_end = min(cur + pd.DateOffset(days=299), end)
-        for attempt in range(max_retries):
-            try:
-                r = obj.getCandleData({
-                    "exchange": "NSE",
-                    "symboltoken": token,
-                    "interval": "ONE_DAY",
-                    "fromdate": cur.strftime("%Y-%m-%d %H:%M"),
-                    "todate": chunk_end.strftime("%Y-%m-%d %H:%M"),
-                })
-                if r.get("status") and r.get("data"):
-                    rows.extend(r["data"])
-                break
-            except Exception:
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-        cur = chunk_end + pd.DateOffset(days=1)
-        time.sleep(0.35)
+    tickers_ns = [f"{s}.NS" for s in symbols]
 
-    if not rows:
-        return pd.DataFrame()
+    try:
+        raw = yf.download(
+            tickers_ns,
+            start=start, end=end,
+            auto_adjust=True,
+            group_by="ticker",
+            threads=True,
+            progress=False,
+        )
+    except Exception:
+        return {}
 
-    df = pd.DataFrame(rows, columns=["datetime", "open", "high", "low", "close", "volume"])
-    df["datetime"] = pd.to_datetime(df["datetime"])
-    df = df.drop_duplicates("datetime").sort_values("datetime").set_index("datetime")
-    df.index = df.index.tz_localize(None)
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df.dropna(subset=["close"], inplace=True)
-    return df
+    if raw is None or raw.empty:
+        return {}
 
+    results = {}
+    multi = len(symbols) > 1
 
-def fetch_with_cache(
-    obj: SmartConnect,
-    token: str,
-    symbol: str,
-    from_date: str,
-    to_date: str,
-) -> pd.DataFrame:
-    """Fetch OHLCV using per-stock pickle cache (< 1 day old = reuse)."""
-    cache_path = os.path.join(CACHE_DIR, f"{symbol}_1D.pkl")
-    if os.path.exists(cache_path):
-        age_days = (time.time() - os.path.getmtime(cache_path)) / 86400
-        if age_days < 1:
-            with open(cache_path, "rb") as fh:
-                df = pickle.load(fh)
-            if not df.empty:
-                return df
+    for sym, ticker_ns in zip(symbols, tickers_ns):
+        try:
+            df = raw[ticker_ns].copy() if multi else raw.copy()
 
-    df = fetch_daily_ohlcv(obj, token, symbol, from_date, to_date)
-    if not df.empty:
-        with open(cache_path, "wb") as fh:
-            pickle.dump(df, fh)
-    return df
+            if df.empty:
+                continue
+
+            df.columns = [str(c).lower() for c in df.columns]
+            required = {"open", "high", "low", "close", "volume"}
+            if not required.issubset(df.columns):
+                continue
+
+            df = df[["open", "high", "low", "close", "volume"]]
+            df.index = pd.to_datetime(df.index)
+            if df.index.tz is not None:
+                df.index = df.index.tz_convert(None)
+            df = df[~df.index.duplicated(keep="last")].sort_index()
+            df.dropna(subset=["close"], inplace=True)
+            df = df[(df["close"] > 0) & (df["volume"] >= 0)]
+
+            if len(df) >= MIN_DATA_DAYS:
+                results[sym] = df
+
+        except Exception:
+            continue
+
+    return results
+
 
 # =============================================================================
 # NIFTY REFERENCE DATA (for RS calculation)
 # =============================================================================
-_nifty_cache: pd.Series | None = None
-
-def load_nifty(obj: SmartConnect, from_date: str, to_date: str) -> pd.Series:
-    global _nifty_cache
-    if _nifty_cache is not None:
-        return _nifty_cache
-    nf = fetch_daily_ohlcv(obj, NIFTY_TOKEN, "NIFTY50", from_date, to_date)
-    if nf.empty:
-        _nifty_cache = pd.Series(dtype=float)
-    else:
-        _nifty_cache = nf["close"]
-    return _nifty_cache
+def fetch_nifty_close(years: int = FETCH_YEARS) -> pd.Series:
+    """Fetch Nifty 50 index close prices from Yahoo Finance."""
+    today = datetime.date.today()
+    start = (today - datetime.timedelta(days=int(years * 365.25))).strftime("%Y-%m-%d")
+    try:
+        raw = yf.download("^NSEI", start=start, auto_adjust=True, progress=False)
+        if raw is None or raw.empty:
+            return pd.Series(dtype=float)
+        close = raw["Close"].squeeze()
+        close.index = pd.to_datetime(close.index)
+        if close.index.tz is not None:
+            close.index = close.index.tz_convert(None)
+        close.name = "close"
+        return close
+    except Exception:
+        return pd.Series(dtype=float)
 
 # =============================================================================
 # INDICATOR COMPUTATION
@@ -427,6 +389,13 @@ def compute_indicators(df: pd.DataFrame, nifty_close: pd.Series | None = None) -
         return None
 
     d = df.copy()
+
+    # Normalize to timezone-naive (cached files may have UTC+05:30 from yfinance)
+    if d.index.tz is not None:
+        d.index = d.index.tz_convert(None)
+    if nifty_close is not None and nifty_close.index.tz is not None:
+        nifty_close = nifty_close.copy()
+        nifty_close.index = nifty_close.index.tz_convert(None)
 
     # ---- EMAs on Close ----
     d["EMA5"]   = d["close"].ewm(span=5,   adjust=False).mean()
@@ -507,17 +476,11 @@ def compute_indicators(df: pd.DataFrame, nifty_close: pd.Series | None = None) -
 
     # ---- Mini-Base (volatility contraction) ----
     # Check if the last MINI_BASE_BARS bars have ATR contracting (each < previous)
-    atr_series = d["ATR14"]
-    mini_base_list = []
-    for i in range(len(d)):
-        if i < MINI_BASE_BARS:
-            mini_base_list.append(False)
-            continue
-        window = atr_series.iloc[i - MINI_BASE_BARS + 1: i + 1].values
-        # count bars where ATR is lower than the bar before it
-        contracting = sum(1 for j in range(1, len(window)) if window[j] < window[j-1])
-        mini_base_list.append(contracting >= MINI_BASE_MIN)
-    d["Mini_Base"] = mini_base_list
+    atr_declining = d["ATR14"].diff() < 0
+    d["Mini_Base"] = (
+        atr_declining.rolling(MINI_BASE_BARS - 1, min_periods=MINI_BASE_BARS - 1).sum()
+        >= MINI_BASE_MIN
+    ).fillna(False)
 
     # ---- Swing High (10-bar rolling max, shifted by 1 to avoid lookahead) ----
     d["Swing_Hi10"] = d["high"].rolling(10).max().shift(1)
@@ -1071,45 +1034,17 @@ def run_backtest(
     print(f"  Rank Method: {RANK_METHOD.upper()}  |  ROC Period: {ROC_PERIOD} days")
     print("=" * 70)
 
-    # Login
-    print("\nLogging in to Angel One...")
-    obj = angel_login()
-    print("  LOGIN SUCCESSFUL\n")
-
-    # Build symbol map
-    print("Loading NSE symbol map...")
-    sym_map = get_nse_symbol_map()
-
     # Decide universe
+    print("\nBuilding stock universe...")
     if use_all_nse and tickers is None:
-        universe = list(sym_map.items())
+        universe = get_nse_universe()
         print(f"  Universe: ALL NSE-EQ stocks ({len(universe):,})")
     elif tickers is not None:
-        # Filter sym_map to only include stocks in the provided tickers list
-        universe = []
-        not_found = []
-        for t in tickers:
-            tok = resolve_ticker(t, sym_map)
-            if tok:
-                universe.append((t, tok))
-            else:
-                not_found.append(t)
-        if not_found:
-            print(f"  WARNING: {len(not_found)} tickers not found in symbol map: {not_found[:20]}{'...' if len(not_found) > 20 else ''}")
+        universe = list(tickers)
         print(f"  Universe: {len(universe):,} stocks (from provided tickers list)")
     else:
-        # Default: use NIFTY_500
-        universe = []
-        not_found = []
-        for t in NIFTY_500:
-            tok = resolve_ticker(t, sym_map)
-            if tok:
-                universe.append((t, tok))
-            else:
-                not_found.append(t)
-        if not_found:
-            print(f"  WARNING: {len(not_found)} NIFTY_500 tickers not found: {not_found[:20]}{'...' if len(not_found) > 20 else ''}")
-        print(f"  Universe: NIFTY 500 ({len(universe):,} stocks resolved)")
+        universe = list(NIFTY_500)
+        print(f"  Universe: NIFTY 500 ({len(universe):,} stocks)")
 
     if max_stocks is not None:
         universe = universe[:max_stocks]
@@ -1117,56 +1052,95 @@ def run_backtest(
     total = len(universe)
     print(f"\nUniverse: {total:,} stocks\n")
 
-    # Date range for fetching
-    today      = datetime.date.today()
-    fetch_end  = today.strftime("%Y-%m-%d")
-    fetch_start = (today - datetime.timedelta(days=365 * FETCH_YEARS)).strftime("%Y-%m-%d")
-
     # Fetch Nifty reference data (for RS calculation)
     print("Fetching Nifty 50 data for RS calculation...")
-    nifty_close = load_nifty(obj, fetch_start, fetch_end)
-    if nifty_close.empty:
+    nifty_close = fetch_nifty_close(FETCH_YEARS)
+    if nifty_close is None or nifty_close.empty:
         print("  WARNING: Nifty data unavailable, RS_Leader will be set to True for all stocks.")
+        nifty_close = None
     else:
         print(f"  Nifty data: {len(nifty_close):,} bars")
 
     # =================================================================
-    # PASS 1: Fetch data + compute indicators for ALL stocks
+    # PASS 1: Resolve cache / batch-fetch + compute indicators
     # =================================================================
-    print(f"\n--- PASS 1: Fetching data & computing indicators for {total:,} stocks ---\n")
-    stock_data = {}  # {symbol: DataFrame with indicators}
-    processed  = 0
-    skipped    = 0
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    print(f"\n--- PASS 1: Loading data for {total:,} stocks ---\n")
 
-    t0 = time.time()
-    for i, (symbol, token) in enumerate(universe, 1):
-        if i % 10 == 0 or i == 1:
-            elapsed = time.time() - t0
-            rate    = i / max(elapsed, 1)
-            eta_m   = (total - i) / rate / 60 if rate > 0 else 0
-            print(f"  [{i:4d}/{total}] {symbol:<18}  loaded:{len(stock_data):4d}  "
-                  f"ETA:{eta_m:.1f}min", flush=True)
+    stock_data = {}   # symbol -> computed DataFrame
+    to_fetch   = []   # symbols not found in any cache
+    from_cache = 0
+    t0         = time.time()
 
-        try:
-            df_raw = fetch_with_cache(obj, token, symbol, fetch_start, fetch_end)
-            if df_raw.empty or len(df_raw) < MIN_DATA_DAYS:
-                skipped += 1
-                continue
+    for symbol in universe:
+        primary = os.path.join(CACHE_DIR, f"{symbol}.pkl")
+        search  = [primary] + [
+            os.path.join(fb, f"{symbol}.pkl") for fb in CACHE_FALLBACK_DIRS
+        ]
+        df = None
+        for path in search:
+            if os.path.exists(path):
+                age_h = (time.time() - os.path.getmtime(path)) / 3600
+                if age_h < CACHE_MAX_AGE_HOURS:
+                    try:
+                        with open(path, "rb") as f:
+                            df = pickle.load(f)
+                        if path != primary and df is not None:
+                            with open(primary, "wb") as f:
+                                pickle.dump(df, f)
+                        break
+                    except Exception:
+                        df = None
 
-            df_ind = compute_indicators(df_raw, nifty_close if not nifty_close.empty else None)
-            if df_ind is None:
-                skipped += 1
-                continue
+        if df is not None:
+            d = compute_indicators(df.copy(), nifty_close)
+            if d is not None:
+                stock_data[symbol] = d
+                from_cache += 1
+        else:
+            to_fetch.append(symbol)
 
-            stock_data[symbol] = df_ind
-            processed += 1
+    elapsed_cache = time.time() - t0
+    print(f"  From cache   : {from_cache:,} stocks  ({elapsed_cache:.1f}s)")
+    print(f"  To download  : {len(to_fetch):,} stocks via Yahoo Finance")
 
-        except Exception as e:
-            print(f"\n  ERROR on {symbol}: {e}")
-            skipped += 1
+    if to_fetch:
+        batches = [to_fetch[i:i + BATCH_SIZE] for i in range(0, len(to_fetch), BATCH_SIZE)]
+        t1      = time.time()
+        fetched = 0
+        failed  = 0
 
-    elapsed_m = (time.time() - t0) / 60
-    print(f"\n  Pass 1 done. {processed:,} stocks loaded, {skipped:,} skipped in {elapsed_m:.1f} min")
+        print(f"\n  Downloading {len(to_fetch):,} stocks in {len(batches)} batches of {BATCH_SIZE}...")
+        for bi, batch in enumerate(batches, 1):
+            batch_results = fetch_batch_yf(batch, years=FETCH_YEARS)
+
+            for sym, df in batch_results.items():
+                primary = os.path.join(CACHE_DIR, f"{sym}.pkl")
+                try:
+                    with open(primary, "wb") as f:
+                        pickle.dump(df, f)
+                except Exception:
+                    pass
+
+                d = compute_indicators(df.copy(), nifty_close)
+                if d is not None:
+                    stock_data[sym] = d
+                    fetched += 1
+                else:
+                    failed += 1
+
+            failed += len(batch) - len(batch_results)
+
+            elapsed1 = time.time() - t1
+            rate     = bi / elapsed1 if elapsed1 > 0 else 1
+            eta_min  = (len(batches) - bi) / rate / 60
+            print(f"  Batch [{bi:>4}/{len(batches)}]  loaded so far: {len(stock_data):>4}  ETA: {eta_min:.1f} min")
+
+        elapsed_fetch = (time.time() - t1) / 60
+        print(f"\n  Download done: {fetched:,} fetched, {failed:,} failed/empty in {elapsed_fetch:.1f} min")
+
+    elapsed_1 = (time.time() - t0) / 60
+    print(f"\n  Pass 1 done. {len(stock_data):,} stocks ready in {elapsed_1:.1f} min")
 
     if not stock_data:
         print("  No stock data available. Exiting.")
