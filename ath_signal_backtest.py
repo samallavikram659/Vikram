@@ -60,7 +60,7 @@ EXTENSION_MULT       = 3.0             # ATR multiplier for extension exit
 MIN_HOLD_DAYS        = 2               # bars before switching to tighter EMA stop
 RS_LOOKBACK          = 20              # days for relative-strength calculation
 
-CACHE_DIR            = "cache_ath_signal"
+CACHE_DIR            = "cache_near_high"   # reuse same cache as oliver combined backtest
 MIN_DATA_DAYS        = 252             # minimum bars needed per stock
 
 # =============================================================================
@@ -591,7 +591,7 @@ def run_backtest(use_all_nse: bool = True, tickers: list[str] | None = None,
         # Try cache
         if os.path.exists(cache_file):
             age_h = (time.time() - os.path.getmtime(cache_file)) / 3600
-            if age_h < 12:
+            if age_h < 24:
                 try:
                     with open(cache_file, "rb") as f:
                         df = pickle.load(f)
