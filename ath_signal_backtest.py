@@ -60,9 +60,10 @@ EXTENSION_MULT       = 3.0             # ATR multiplier for extension exit
 MIN_HOLD_DAYS        = 2               # bars before switching to tighter EMA stop
 RS_LOOKBACK          = 20              # days for relative-strength calculation
 
-CACHE_DIR            = "cache_near_high"   # reuse same cache as oliver combined backtest
+CACHE_DIR            = "cache_ath_signal"  # primary cache dir for this script
+CACHE_FALLBACK_DIRS  = ["cache_near_high"] # also check these dirs for existing data
 CACHE_MAX_AGE_HOURS  = 168             # use cache up to 7 days old (avoids re-fetching)
-SKIP_API             = True            # True = use cache only, skip stocks not in cache (FAST)
+SKIP_API             = False           # False = fetch from API when not in cache
 MIN_DATA_DAYS        = 252             # minimum bars needed per stock
 
 # =============================================================================
@@ -589,17 +590,26 @@ def run_backtest(use_all_nse: bool = True, tickers: list[str] | None = None,
         cache_file = os.path.join(CACHE_DIR, f"{symbol}.pkl")
         df = None
 
-        # Try cache
-        if os.path.exists(cache_file):
-            age_h = (time.time() - os.path.getmtime(cache_file)) / 3600
-            if age_h < CACHE_MAX_AGE_HOURS:
-                try:
-                    with open(cache_file, "rb") as f:
-                        df = pickle.load(f)
-                except Exception:
-                    df = None
+        # Try primary cache, then fallback dirs
+        search_paths = [cache_file] + [
+            os.path.join(fb, f"{symbol}.pkl") for fb in CACHE_FALLBACK_DIRS
+        ]
+        for path in search_paths:
+            if os.path.exists(path):
+                age_h = (time.time() - os.path.getmtime(path)) / 3600
+                if age_h < CACHE_MAX_AGE_HOURS:
+                    try:
+                        with open(path, "rb") as f:
+                            df = pickle.load(f)
+                        # Copy to primary cache dir if loaded from fallback
+                        if path != cache_file and df is not None:
+                            with open(cache_file, "wb") as f:
+                                pickle.dump(df, f)
+                        break
+                    except Exception:
+                        df = None
 
-        # Fetch from API if not cached (skip if SKIP_API=True)
+        # Fetch from API if not in any cache
         if df is None:
             if SKIP_API:
                 skipped += 1
@@ -662,11 +672,14 @@ def run_backtest(use_all_nse: bool = True, tickers: list[str] | None = None,
 # ENTRY POINT
 # =============================================================================
 if __name__ == "__main__":
-    # All NSE EQ stocks (~2500)
-    run_backtest(use_all_nse=True, max_stocks=None)
+    # ── OPTION 1 (default): Nifty 500 only ────────────────────────────────────
+    # ~475 stocks, downloads in ~5 min, good for quick backtest results
+    run_backtest(use_all_nse=False, tickers=NIFTY_500)
 
-    # Nifty 500 only (faster)
-    # run_backtest(use_all_nse=False, tickers=NIFTY_500)
+    # ── OPTION 2: All NSE EQ stocks (~2500) ───────────────────────────────────
+    # First run takes ~15-20 min to download; subsequent runs use cache (< 2 min)
+    # Best run overnight. Switch by commenting Option 1 and uncommenting below:
+    # run_backtest(use_all_nse=True, max_stocks=None)
 
-    # Quick test: first 100 stocks
+    # ── OPTION 3: Quick test ──────────────────────────────────────────────────
     # run_backtest(use_all_nse=True, max_stocks=100)
