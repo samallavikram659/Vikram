@@ -86,6 +86,11 @@ BATCH_SIZE           = 50                       # stocks per yfinance batch requ
 # Derived
 PER_POSITION_CAPITAL = INITIAL_CAPITAL / MAX_POSITIONS  # ~33,333 per slot
 
+# Sector filters
+USE_SECTOR_FILTER    = True   # enable sector trend + diversity filters
+MAX_SAME_SECTOR      = 1      # max positions from the same sector at once
+SECTOR_TREND_EMA     = 50     # EMA period for sector index trend detection
+
 # =============================================================================
 # ETF / FUND EXCLUSION PATTERNS
 # =============================================================================
@@ -97,6 +102,43 @@ ETF_PATTERNS = [
 def is_etf(name: str) -> bool:
     n = name.upper()
     return any(p in n for p in ETF_PATTERNS)
+
+# =============================================================================
+# SECTOR CONFIGURATION
+# =============================================================================
+SECTOR_INDEX_MAP = {
+    "Banks":   "^NSEBANK",
+    "Finance":  "^CNXFINANCE",
+    "IT":       "^CNXIT",
+    "Pharma":   "^CNXPHARMA",
+    "Auto":     "^CNXAUTO",
+    "FMCG":     "^CNXFMCG",
+    "Metal":    "^CNXMETAL",
+    "Realty":   "^CNXREALTY",
+    "Energy":   "^CNXENERGY",
+    "Media":    "^CNXMEDIA",
+}
+
+SECTOR_KEYWORDS = [
+    ("Banks",   ["bank"]),
+    ("Finance",  ["financ", "nbfc", "housing fin", "insurance", "microfinance"]),
+    ("IT",       ["software", "it-software", "informat", "computer"]),
+    ("Pharma",   ["pharma", "drug", "medicine", "health", "hospital", "biotech", "diagnostic"]),
+    ("Auto",     ["auto", "vehicle", "tyre"]),
+    ("FMCG",     ["fmcg", "consumer good", "food & beverage", "beverage", "tobacco", "edible oil"]),
+    ("Metal",    ["metal", "steel", "alumin", "copper", "zinc", "iron & steel", "mining", "mineral"]),
+    ("Realty",   ["realty", "real estate", "construction", "cement"]),
+    ("Energy",   ["oil & gas", "power", "energy", "petro", "refin", "electricity"]),
+    ("Media",    ["media", "entertainment", "telecom", "broadcasting", "publishing"]),
+]
+
+def classify_industry(industry: str) -> str:
+    """Map NSE industry string to a broad sector name via keyword matching."""
+    ind_lower = industry.lower()
+    for sector, keywords in SECTOR_KEYWORDS:
+        if any(kw in ind_lower for kw in keywords):
+            return sector
+    return industry  # fall back to raw industry name
 
 # =============================================================================
 # NIFTY 500 UNIVERSE (Nifty50 + NiftyNext50 + Midcap150 + Smallcap250)
@@ -384,6 +426,86 @@ def fetch_nifty_close(years: int = FETCH_YEARS) -> pd.Series:
         return pd.Series(dtype=float)
 
 # =============================================================================
+# SECTOR MAP  (symbol -> broad sector)
+# =============================================================================
+def get_sector_map(cache_file: str = "sector_map_yf.pkl") -> dict:
+    """Download Nifty 500 constituent list from NSE to get stock->sector mapping."""
+    if os.path.exists(cache_file):
+        age_h = (time.time() - os.path.getmtime(cache_file)) / 3600
+        if age_h < 168:
+            with open(cache_file, "rb") as fh:
+                return pickle.load(fh)
+    sector_map = {}
+    try:
+        url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+        resp = requests.get(
+            url, timeout=30,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        )
+        resp.raise_for_status()
+        df = pd.read_csv(StringIO(resp.text))
+        sym_col = next((c for c in df.columns if "symbol" in c.lower()), None)
+        ind_col = next((c for c in df.columns if "industr" in c.lower()), None)
+        if sym_col and ind_col:
+            for _, row in df.iterrows():
+                sym = str(row[sym_col]).strip()
+                ind = str(row[ind_col]).strip()
+                if sym:
+                    sector_map[sym] = classify_industry(ind)
+            with open(cache_file, "wb") as fh:
+                pickle.dump(sector_map, fh)
+            print(f"  Sector map: {len(sector_map):,} stocks mapped to {len(set(sector_map.values()))} sectors")
+        else:
+            print(f"  WARNING: Sector CSV columns not as expected. Sector filter partial.")
+    except Exception as e:
+        print(f"  WARNING: Could not load sector map ({e}). Sector filters may be limited.")
+    return sector_map
+
+# =============================================================================
+# SECTOR TRENDS  (sector -> daily trending bool)
+# =============================================================================
+def fetch_sector_trends(years: int = FETCH_YEARS) -> dict:
+    """
+    Fetch NSE sector index data and compute trending status (close > EMA50) per day.
+    Returns: {sector_name: pd.Series(bool, index=DatetimeIndex)}
+    """
+    sector_trends = {}
+    today = datetime.date.today()
+    start = (today - datetime.timedelta(days=int(years * 365.25))).strftime("%Y-%m-%d")
+
+    tickers = list(SECTOR_INDEX_MAP.values())
+    sectors = list(SECTOR_INDEX_MAP.keys())
+
+    try:
+        raw = yf.download(
+            tickers, start=start, auto_adjust=True,
+            group_by="ticker", threads=True, progress=False,
+        )
+        if raw is None or raw.empty:
+            return sector_trends
+
+        for sector, ticker in zip(sectors, tickers):
+            try:
+                close = raw[ticker]["Close"].squeeze() if len(tickers) > 1 else raw["Close"].squeeze()
+                close = close.dropna()
+                if close.empty:
+                    continue
+                close.index = pd.to_datetime(close.index)
+                if close.index.tz is not None:
+                    close.index = close.index.tz_convert(None)
+                ema = close.ewm(span=SECTOR_TREND_EMA, adjust=False).mean()
+                sector_trends[sector] = (close > ema)
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"  WARNING: sector trend fetch failed ({e}). Trend filter disabled.")
+
+    if sector_trends:
+        trending_now = sum(1 for s in sector_trends.values() if not s.empty and bool(s.iloc[-1]))
+        print(f"  Sector trends: {len(sector_trends)} sectors tracked, {trending_now} currently trending")
+    return sector_trends
+
+# =============================================================================
 # INDICATOR COMPUTATION
 # =============================================================================
 def compute_indicators(df: pd.DataFrame, nifty_close: pd.Series | None = None) -> pd.DataFrame | None:
@@ -592,7 +714,12 @@ def signal_type_label(ref_high_type: str, oliver_type: str) -> str:
 # =============================================================================
 # PORTFOLIO-BASED BACKTEST
 # =============================================================================
-def backtest_portfolio(stock_data: dict[str, pd.DataFrame], nifty_close=None) -> tuple[list[dict], list[dict]]:
+def backtest_portfolio(
+    stock_data: dict[str, pd.DataFrame],
+    nifty_close=None,
+    sector_map: dict | None = None,
+    sector_trends: dict | None = None,
+) -> tuple[list[dict], list[dict]]:
     """
     Run day-by-day portfolio simulation across all stocks.
 
@@ -688,6 +815,7 @@ def backtest_portfolio(stock_data: dict[str, pd.DataFrame], nifty_close=None) ->
 
                 trades.append({
                     "Symbol":         symbol,
+                    "Sector":         pos.get("sector", "Unknown"),
                     "Entry_Date":     pos["entry_date"],
                     "Exit_Date":      dt,
                     "Signal_Type":    signal_type_label(pos["ref_high_type"], pos["oliver_type"]),
@@ -733,6 +861,10 @@ def backtest_portfolio(stock_data: dict[str, pd.DataFrame], nifty_close=None) ->
             current_equity = cash + open_positions_value
             position_size = current_equity / MAX_POSITIONS
 
+            # Track how many positions we hold per sector (for diversity cap)
+            from collections import Counter
+            sectors_held = Counter(pos["sector"] for pos in open_positions.values())
+
             entry_candidates = []
 
             for symbol, row_dict in stock_row_lookup.items():
@@ -772,9 +904,32 @@ def backtest_portfolio(stock_data: dict[str, pd.DataFrame], nifty_close=None) ->
             # Sort by ranking method (highest score first)
             entry_candidates.sort(key=lambda x: x["rank_score"], reverse=True)
 
-            # Take up to available_slots
-            for cand in entry_candidates[:available_slots]:
-                ep = cand["close"]
+            # Iterate ALL candidates; sector filters may skip top-ranked ones
+            slots_filled = 0
+            for cand in entry_candidates:
+                if slots_filled >= available_slots:
+                    break
+
+                ep     = cand["close"]
+                symbol = cand["symbol"]
+
+                # Determine sector for this candidate
+                sec = (sector_map or {}).get(symbol, symbol)
+
+                # --- Sector filters (when enabled) ---
+                if USE_SECTOR_FILTER:
+                    # 1. Trend check: sector index must be above its EMA
+                    if sector_trends and sec in sector_trends:
+                        ts_key       = pd.Timestamp(dt)
+                        trend_series = sector_trends[sec]
+                        is_trending  = bool(trend_series.asof(ts_key)) if not trend_series.empty else True
+                        if not is_trending:
+                            continue
+
+                    # 2. Diversity check: cap same-sector positions
+                    if sectors_held.get(sec, 0) >= MAX_SAME_SECTOR:
+                        continue
+
                 sp = round(ep * (1 - STOP_LOSS_PCT), 2)
                 tp = round(cand["ref_high"] * (1 + TARGET_ABOVE_HIGH_PCT), 2)
 
@@ -792,8 +947,10 @@ def backtest_portfolio(stock_data: dict[str, pd.DataFrame], nifty_close=None) ->
                     continue
 
                 cash -= actual_cost
+                sectors_held[sec] += 1
+                slots_filled += 1
 
-                open_positions[cand["symbol"]] = {
+                open_positions[symbol] = {
                     "entry_price":      ep,
                     "stop_price":       sp,
                     "target_price":     tp,
@@ -804,6 +961,7 @@ def backtest_portfolio(stock_data: dict[str, pd.DataFrame], nifty_close=None) ->
                     "bars_held":        0,
                     "shares":           shares,
                     "allocated_capital": actual_cost,
+                    "sector":           sec,
                 }
 
         # ================================================================
@@ -852,6 +1010,7 @@ def backtest_portfolio(stock_data: dict[str, pd.DataFrame], nifty_close=None) ->
 
             trades.append({
                 "Symbol":         symbol,
+                "Sector":         pos.get("sector", "Unknown"),
                 "Entry_Date":     pos["entry_date"],
                 "Exit_Date":      last_date,
                 "Signal_Type":    signal_type_label(pos["ref_high_type"], pos["oliver_type"]),
@@ -983,6 +1142,15 @@ def performance_report(
         wr    = (trades_df[(trades_df["Signal_Type"] == st) & (trades_df["PnL_Rs"] > 0)].shape[0]
                  / cnt * 100)
         print(f"    {st:<30}: {cnt:4d} trades  avg {avg_p:>+6.1f}%  WR {wr:5.1f}%")
+
+    if "Sector" in trades_df.columns:
+        print(f"\n  SECTOR BREAKDOWN:")
+        for sec, cnt in trades_df["Sector"].value_counts().items():
+            avg_p  = trades_df[trades_df["Sector"] == sec]["PnL_Pct"].mean()
+            pnl_rs = trades_df[trades_df["Sector"] == sec]["PnL_Rs"].sum()
+            wr     = (trades_df[(trades_df["Sector"] == sec) & (trades_df["PnL_Rs"] > 0)].shape[0]
+                      / cnt * 100)
+            print(f"    {sec:<22}: {cnt:4d} trades  avg {avg_p:>+6.1f}%  WR {wr:5.1f}%  PnL Rs {pnl_rs:>10,.0f}")
 
     # ---- CAGR ----
     if not equity_curve_df.empty and len(equity_curve_df) > 1:
@@ -1169,13 +1337,25 @@ def run_backtest(
         if nifty_rank is None:
             print("  WARNING: Nifty data unavailable, falling back to momentum ranking")
 
+    # Sector map and trend data
+    sector_map    = {}
+    sector_trends = {}
+    if USE_SECTOR_FILTER:
+        print("\nLoading sector map (Nifty 500 constituents)...")
+        sector_map = get_sector_map()
+        print("\nFetching sector index trends...")
+        sector_trends = fetch_sector_trends(FETCH_YEARS)
+        if not sector_trends:
+            print("  WARNING: No sector trend data fetched. Trend filter will be skipped.")
+
     # =================================================================
     # PASS 2: Day-by-day portfolio simulation
     # =================================================================
-    print(f"\n--- PASS 2: Portfolio simulation ({len(stock_data):,} stocks) | Rank: {RANK_METHOD.upper()} ---\n")
+    sector_status = "ON" if USE_SECTOR_FILTER else "OFF"
+    print(f"\n--- PASS 2: Portfolio simulation ({len(stock_data):,} stocks) | Rank: {RANK_METHOD.upper()} | Sector filter: {sector_status} ---\n")
 
     t1 = time.time()
-    all_trades, equity_curve = backtest_portfolio(stock_data, nifty_rank)
+    all_trades, equity_curve = backtest_portfolio(stock_data, nifty_rank, sector_map, sector_trends)
     sim_elapsed = (time.time() - t1) / 60
 
     print(f"  Pass 2 done. {len(all_trades):,} trades in {sim_elapsed:.1f} min")
