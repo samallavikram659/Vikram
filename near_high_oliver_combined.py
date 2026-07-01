@@ -123,17 +123,17 @@ SECTOR_TREND_EMA     = 50     # EMA period for sector index trend detection
 # limit order.
 SLIPPAGE_PCT         = 0.05   # % adverse slippage on market-style fills (buy higher / sell lower)
 
-# Statutory / broker charges. Defaults assume a typical Indian discount
-# broker's zero-brokerage delivery plan (Zerodha/Angel One/Upstox all offer
-# this) -- adjust BROKERAGE_PCT / BROKERAGE_FLAT if your broker charges more.
+# Statutory / broker charges. Defaults match Angel One's iTrade Prime plan
+# (zero brokerage on equity delivery) as of mid-2026 -- adjust BROKERAGE_PCT /
+# BROKERAGE_FLAT if you're on a different plan or broker.
 BROKERAGE_PCT        = 0.0    # brokerage % of turnover per order (0 = free delivery)
 BROKERAGE_FLAT       = 0.0    # flat Rs per order (use if your broker charges a flat fee instead)
 STT_PCT              = 0.1    # Securities Transaction Tax %, charged on BOTH buy and sell (delivery)
-EXCHANGE_TXN_PCT     = 0.00297  # NSE transaction charges %
-SEBI_PCT             = 0.0001   # SEBI turnover fees % (~Rs 10 per crore)
+EXCHANGE_TXN_PCT     = 0.00297  # NSE transaction charges % (Rs 2.97/lakh/side, effective Oct 2024)
+SEBI_PCT             = 0.0001   # SEBI turnover fees % (Rs 10 per crore)
 STAMP_DUTY_PCT       = 0.015    # stamp duty %, BUY side only
-GST_PCT              = 18.0     # GST % on (brokerage + exchange charges + SEBI fees)
-DP_CHARGE_PER_SELL   = 20.0     # flat Rs per scrip on SELL side (DP + broker charges, delivery)
+GST_PCT              = 18.0     # GST % on (brokerage + exchange charges + SEBI fees + DP charge)
+DP_CHARGE_PER_SELL   = 20.0     # Rs per scrip on SELL side, DP charge BEFORE GST (Angel One: Rs 20 + GST)
 
 
 def buy_cost(turnover: float) -> float:
@@ -153,7 +153,7 @@ def sell_cost(turnover: float) -> float:
     stt       = turnover * STT_PCT / 100
     exch      = turnover * EXCHANGE_TXN_PCT / 100
     sebi      = turnover * SEBI_PCT / 100
-    gst       = (brokerage + exch + sebi) * GST_PCT / 100
+    gst       = (brokerage + exch + sebi + DP_CHARGE_PER_SELL) * GST_PCT / 100
     return brokerage + stt + exch + sebi + gst + DP_CHARGE_PER_SELL
 
 # =============================================================================
