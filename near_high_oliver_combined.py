@@ -455,7 +455,7 @@ def fetch_batch_yf(symbols: list, years: int = FETCH_YEARS) -> dict:
             df = df[["open", "high", "low", "close", "volume"]]
             df.index = pd.to_datetime(df.index)
             if df.index.tz is not None:
-                df.index = df.index.tz_convert(None)
+                df.index = df.index.tz_localize(None)
             df = df[~df.index.duplicated(keep="last")].sort_index()
             df.dropna(subset=["close"], inplace=True)
             df = df[(df["close"] > 0) & (df["volume"] >= 0)]
@@ -483,7 +483,7 @@ def fetch_nifty_close(years: int = FETCH_YEARS) -> pd.Series:
         close = raw["Close"].squeeze()
         close.index = pd.to_datetime(close.index)
         if close.index.tz is not None:
-            close.index = close.index.tz_convert(None)
+            close.index = close.index.tz_localize(None)
         close.name = "close"
         return close
     except Exception:
@@ -556,7 +556,7 @@ def fetch_sector_trends(years: int = FETCH_YEARS) -> dict:
                     continue
                 close.index = pd.to_datetime(close.index)
                 if close.index.tz is not None:
-                    close.index = close.index.tz_convert(None)
+                    close.index = close.index.tz_localize(None)
                 ema = close.ewm(span=SECTOR_TREND_EMA, adjust=False).mean()
                 sector_trends[sector] = (close > ema)
             except Exception:
@@ -580,10 +580,10 @@ def compute_indicators(df: pd.DataFrame, nifty_close: pd.Series | None = None) -
 
     # Normalize to timezone-naive (cached files may have UTC+05:30 from yfinance)
     if d.index.tz is not None:
-        d.index = d.index.tz_convert(None)
+        d.index = d.index.tz_localize(None)
     if nifty_close is not None and nifty_close.index.tz is not None:
         nifty_close = nifty_close.copy()
-        nifty_close.index = nifty_close.index.tz_convert(None)
+        nifty_close.index = nifty_close.index.tz_localize(None)
 
     # ---- EMAs on Close ----
     d["EMA5"]   = d["close"].ewm(span=5,   adjust=False).mean()

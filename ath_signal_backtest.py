@@ -258,7 +258,7 @@ def fetch_batch_yf(symbols: list, years: int = FETCH_YEARS) -> dict:
             df = df[["open", "high", "low", "close", "volume"]]
             df.index = pd.to_datetime(df.index)
             if df.index.tz is not None:
-                df.index = df.index.tz_convert(None)
+                df.index = df.index.tz_localize(None)
             df = df[~df.index.duplicated(keep="last")].sort_index()
             df.dropna(subset=["close"], inplace=True)
             df = df[(df["close"] > 0) & (df["volume"] >= 0)]
@@ -283,7 +283,7 @@ def fetch_nifty_close(years: int = FETCH_YEARS) -> pd.Series | None:
         close = raw["Close"].squeeze()
         close.index = pd.to_datetime(close.index)
         if close.index.tz is not None:
-            close.index = close.index.tz_convert(None)
+            close.index = close.index.tz_localize(None)
         close.name = "close"
         return close
     except Exception:
@@ -299,10 +299,10 @@ def compute_indicators(d: pd.DataFrame, nifty_close=None) -> pd.DataFrame | None
 
     # Normalize to timezone-naive (cached files may have UTC+05:30 from yfinance)
     if d.index.tz is not None:
-        d.index = d.index.tz_convert(None)
+        d.index = d.index.tz_localize(None)
     if nifty_close is not None and nifty_close.index.tz is not None:
         nifty_close = nifty_close.copy()
-        nifty_close.index = nifty_close.index.tz_convert(None)
+        nifty_close.index = nifty_close.index.tz_localize(None)
 
     # EMAs
     for span in [5, 10, 20, 50, 150, 200]:
