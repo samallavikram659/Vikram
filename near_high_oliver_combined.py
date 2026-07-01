@@ -108,7 +108,6 @@ def is_etf(name: str) -> bool:
 # =============================================================================
 SECTOR_INDEX_MAP = {
     "Banks":   "^NSEBANK",
-    "Finance":  "^CNXFINANCE",
     "IT":       "^CNXIT",
     "Pharma":   "^CNXPHARMA",
     "Auto":     "^CNXAUTO",
@@ -865,6 +864,17 @@ def backtest_portfolio(
             from collections import Counter
             sectors_held = Counter(pos["sector"] for pos in open_positions.values())
 
+            # Compute which sectors are trending TODAY — once per day, not per candidate
+            # (avoids O(candidates) asof() calls; replaces with O(sectors) = ~9 calls/day)
+            ts_key = pd.Timestamp(dt)
+            trending_sectors = set()
+            if USE_SECTOR_FILTER and sector_trends:
+                for _sec, _ts in sector_trends.items():
+                    if not _ts.empty:
+                        val = _ts.asof(ts_key)
+                        if pd.notna(val) and bool(val):
+                            trending_sectors.add(_sec)
+
             entry_candidates = []
 
             for symbol, row_dict in stock_row_lookup.items():
@@ -919,12 +929,9 @@ def backtest_portfolio(
                 # --- Sector filters (when enabled) ---
                 if USE_SECTOR_FILTER:
                     # 1. Trend check: sector index must be above its EMA
-                    if sector_trends and sec in sector_trends:
-                        ts_key       = pd.Timestamp(dt)
-                        trend_series = sector_trends[sec]
-                        is_trending  = bool(trend_series.asof(ts_key)) if not trend_series.empty else True
-                        if not is_trending:
-                            continue
+                    #    trending_sectors was precomputed once for today (not per candidate)
+                    if sec in sector_trends and sec not in trending_sectors:
+                        continue
 
                     # 2. Diversity check: cap same-sector positions
                     if sectors_held.get(sec, 0) >= MAX_SAME_SECTOR:
@@ -1144,13 +1151,21 @@ def performance_report(
         print(f"    {st:<30}: {cnt:4d} trades  avg {avg_p:>+6.1f}%  WR {wr:5.1f}%")
 
     if "Sector" in trades_df.columns:
-        print(f"\n  SECTOR BREAKDOWN:")
-        for sec, cnt in trades_df["Sector"].value_counts().items():
-            avg_p  = trades_df[trades_df["Sector"] == sec]["PnL_Pct"].mean()
-            pnl_rs = trades_df[trades_df["Sector"] == sec]["PnL_Rs"].sum()
-            wr     = (trades_df[(trades_df["Sector"] == sec) & (trades_df["PnL_Rs"] > 0)].shape[0]
-                      / cnt * 100)
+        print(f"\n  SECTOR BREAKDOWN (sectors with >= 3 trades):")
+        vc = trades_df["Sector"].value_counts()
+        other = trades_df[trades_df["Sector"].isin(vc[vc < 3].index)]
+        for sec, cnt in vc[vc >= 3].items():
+            sub    = trades_df[trades_df["Sector"] == sec]
+            avg_p  = sub["PnL_Pct"].mean()
+            pnl_rs = sub["PnL_Rs"].sum()
+            wr     = (sub[sub["PnL_Rs"] > 0].shape[0] / cnt * 100)
             print(f"    {sec:<22}: {cnt:4d} trades  avg {avg_p:>+6.1f}%  WR {wr:5.1f}%  PnL Rs {pnl_rs:>10,.0f}")
+        if not other.empty:
+            o_cnt  = len(other)
+            o_avg  = other["PnL_Pct"].mean()
+            o_pnl  = other["PnL_Rs"].sum()
+            o_wr   = (other[other["PnL_Rs"] > 0].shape[0] / o_cnt * 100)
+            print(f"    {'Other (niche)':<22}: {o_cnt:4d} trades  avg {o_avg:>+6.1f}%  WR {o_wr:5.1f}%  PnL Rs {o_pnl:>10,.0f}")
 
     # ---- CAGR ----
     if not equity_curve_df.empty and len(equity_curve_df) > 1:
