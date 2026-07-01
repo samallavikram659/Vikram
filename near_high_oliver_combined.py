@@ -19,17 +19,28 @@ PORTFOLIO : INITIAL_CAPITAL = Rs 1,00,000 (1 lakh)
 SIMULATION: Two-pass approach
             Pass 1 - Fetch data + compute indicators for ALL stocks
             Pass 2 - Iterate day-by-day across all trading dates
-              (a) Check all open positions for exits first
-              (b) Then scan for new entry signals (if open < MAX_POSITIONS)
+              (0) Fill pending entries from yesterday's scan at TODAY's open
+                  (models running the scan after market close, placing the
+                  order overnight, and it filling at next day's open)
+              (a) Check all open positions for exits
+              (b) Scan for new entry signals (if open < MAX_POSITIONS),
+                  queue accepted candidates for tomorrow's open (not filled
+                  today -- no same-day lookahead)
               (c) On ties, pick highest momentum (closest to reference high)
 
 ENTRY     : EMA alignment (Close > EMA5 > EMA10 > EMA20 > EMA50 > EMA150 > EMA200)
           + Close within 5-10% BELOW the key high (1Y / 5Y / ATH)
           + Oliver Kell signal: Wedge_Pop OR Crossback
+          + Filled at NEXT trading day's Open (signal detected on prior close)
 
-EXIT      : (checked in priority order)
-            1. Stop loss 5% below entry price           (on bar Low)
-            2. Target 10% above ref high                (on bar High)
+EXIT      : (checked in priority order, both stop and target modeled as
+             resting LIMIT sell orders -- fill only if price actually
+             trades at that level, not on a gap through it)
+            1. Stop loss 5% below entry price (LIMIT order: fills only if
+               Low <= stop <= High; a gap-down below stop leaves it unfilled
+               and the position stays open, exposed until price recovers to
+               the stop level or another exit rule triggers)
+            2. Target 10% above ref high (LIMIT order: fills if High >= target)
             3. Oliver Trailing EMA stop (EMA20 early, EMA10 after MIN_HOLD_DAYS)
             4. Extension exit (Close > EMA20 + 3*ATR)
 
@@ -757,6 +768,10 @@ def backtest_portfolio(
     peak_equity = float(INITIAL_CAPITAL)
     max_concurrent = 0
 
+    # Signals detected after today's close are queued here and filled at
+    # NEXT trading day's open (no same-day lookahead entry).
+    pending_entries = []
+
     # Pre-build per-stock row lookups for fast access
     # For each stock, build a dict: {timestamp -> row_as_dict}
     stock_row_lookup = {}
@@ -768,6 +783,83 @@ def backtest_portfolio(
 
     # ---- Day-by-day simulation ----
     for dt in all_dates:
+        # ================================================================
+        # STEP 0: FILL PENDING ENTRIES (signals detected at yesterday's
+        # close, executed at today's open — models placing the order after
+        # market close and having it filled the next trading day)
+        # ================================================================
+        if pending_entries:
+            open_positions_value = 0.0
+            for symbol, pos in open_positions.items():
+                row = stock_row_lookup.get(symbol, {}).get(dt)
+                if row is not None:
+                    open_positions_value += pos["shares"] * float(row["close"])
+                else:
+                    open_positions_value += pos["allocated_capital"]
+
+            current_equity  = cash + open_positions_value
+            position_size   = current_equity / MAX_POSITIONS
+            available_fills = MAX_POSITIONS - len(open_positions)
+
+            from collections import Counter
+            sectors_held_fill = Counter(pos["sector"] for pos in open_positions.values())
+
+            filled = 0
+            for cand in pending_entries:
+                if filled >= available_fills:
+                    break
+
+                symbol = cand["symbol"]
+                if symbol in open_positions:
+                    continue
+
+                row = stock_row_lookup.get(symbol, {}).get(dt)
+                if row is None:
+                    continue  # stock didn't trade today; order can't fill, signal lost
+
+                sec = cand["sector"]
+                if USE_SECTOR_FILTER and sectors_held_fill.get(sec, 0) >= MAX_SAME_SECTOR:
+                    continue  # sector slot already taken by another fill today
+
+                ep = float(row["open"])
+                if ep <= 0:
+                    continue
+
+                sp = round(ep * (1 - STOP_LOSS_PCT), 2)
+                tp = round(cand["ref_high"] * (1 + TARGET_ABOVE_HIGH_PCT), 2)
+
+                alloc = min(position_size, cash)
+                if alloc < 1.0:
+                    continue
+
+                shares = int(alloc / ep)
+                if shares < 1:
+                    continue
+
+                actual_cost = shares * ep
+                if actual_cost > cash:
+                    continue
+
+                cash -= actual_cost
+                sectors_held_fill[sec] += 1
+                filled += 1
+
+                open_positions[symbol] = {
+                    "entry_price":      ep,
+                    "stop_price":       sp,
+                    "target_price":     tp,
+                    "ref_high":         cand["ref_high"],
+                    "ref_high_type":    cand["ref_high_type"],
+                    "oliver_type":      cand["oliver_type"],
+                    "entry_date":       dt,
+                    "bars_held":        0,
+                    "shares":           shares,
+                    "allocated_capital": actual_cost,
+                    "sector":           sec,
+                }
+
+            pending_entries = []
+
         # ================================================================
         # STEP 1: CHECK ALL OPEN POSITIONS FOR EXIT CONDITIONS
         # ================================================================
@@ -785,12 +877,16 @@ def backtest_portfolio(
             exit_reason = None
             exit_price  = 0.0
 
-            # 1. Hard stop loss (on Low)
-            if row["low"] <= pos["stop_price"]:
+            # 1. Stop loss as a LIMIT sell order: fills only if price actually
+            #    traded at/through the stop level today (Low <= stop <= High).
+            #    A gap-down that skips over the level entirely (High < stop)
+            #    leaves the limit order unfilled -- position stays open and
+            #    is re-checked the next day (real gap risk of GTT/limit stops).
+            if row["low"] <= pos["stop_price"] <= row["high"]:
                 exit_price  = pos["stop_price"]
                 exit_reason = "Stop_Loss"
 
-            # 2. Target hit (on High)
+            # 2. Target as a LIMIT sell order: fills if High >= target
             elif row["high"] >= pos["target_price"]:
                 exit_price  = pos["target_price"]
                 exit_reason = "Target_Hit"
@@ -842,25 +938,15 @@ def backtest_portfolio(
             del open_positions[s]
 
         # ================================================================
-        # STEP 2: SCAN FOR NEW ENTRY SIGNALS (if slots available)
+        # STEP 2: SCAN FOR NEW ENTRY SIGNALS (after today's close)
+        # Accepted candidates are queued into pending_entries and filled at
+        # NEXT trading day's open (STEP 0) -- not entered same-day.
         # ================================================================
         available_slots = MAX_POSITIONS - len(open_positions)
 
         if available_slots > 0:
-            # Mark open positions to market to get current total equity,
-            # so position sizing compounds with account growth/drawdown.
-            open_positions_value = 0.0
-            for symbol, pos in open_positions.items():
-                row = stock_row_lookup.get(symbol, {}).get(dt)
-                if row is not None:
-                    open_positions_value += pos["shares"] * float(row["close"])
-                else:
-                    open_positions_value += pos["allocated_capital"]
-
-            current_equity = cash + open_positions_value
-            position_size = current_equity / MAX_POSITIONS
-
-            # Track how many positions we hold per sector (for diversity cap)
+            # Track how many positions we hold per sector (for diversity cap),
+            # plus how many pending slots this scan has already claimed today.
             from collections import Counter
             sectors_held = Counter(pos["sector"] for pos in open_positions.values())
 
@@ -914,13 +1000,13 @@ def backtest_portfolio(
             # Sort by ranking method (highest score first)
             entry_candidates.sort(key=lambda x: x["rank_score"], reverse=True)
 
-            # Iterate ALL candidates; sector filters may skip top-ranked ones
-            slots_filled = 0
+            # Iterate ALL candidates; sector filters may skip top-ranked ones.
+            # Queue accepted candidates for tomorrow's open -- no same-day fill.
+            slots_queued = 0
             for cand in entry_candidates:
-                if slots_filled >= available_slots:
+                if slots_queued >= available_slots:
                     break
 
-                ep     = cand["close"]
                 symbol = cand["symbol"]
 
                 # Determine sector for this candidate
@@ -933,43 +1019,21 @@ def backtest_portfolio(
                     if sec in sector_trends and sec not in trending_sectors:
                         continue
 
-                    # 2. Diversity check: cap same-sector positions
+                    # 2. Diversity check: cap same-sector positions (including
+                    #    other candidates already queued from this same scan)
                     if sectors_held.get(sec, 0) >= MAX_SAME_SECTOR:
                         continue
 
-                sp = round(ep * (1 - STOP_LOSS_PCT), 2)
-                tp = round(cand["ref_high"] * (1 + TARGET_ABOVE_HIGH_PCT), 2)
-
-                # Allocate capital for this position (compounds with current equity)
-                alloc = min(position_size, cash)
-                if alloc < 1.0 or ep <= 0:
-                    continue  # not enough capital
-
-                shares = int(alloc / ep)
-                if shares < 1:
-                    continue
-
-                actual_cost = shares * ep
-                if actual_cost > cash:
-                    continue
-
-                cash -= actual_cost
                 sectors_held[sec] += 1
-                slots_filled += 1
+                slots_queued += 1
 
-                open_positions[symbol] = {
-                    "entry_price":      ep,
-                    "stop_price":       sp,
-                    "target_price":     tp,
-                    "ref_high":         cand["ref_high"],
-                    "ref_high_type":    cand["ref_high_type"],
-                    "oliver_type":      cand["oliver_type"],
-                    "entry_date":       dt,
-                    "bars_held":        0,
-                    "shares":           shares,
-                    "allocated_capital": actual_cost,
-                    "sector":           sec,
-                }
+                pending_entries.append({
+                    "symbol":        symbol,
+                    "ref_high":      cand["ref_high"],
+                    "ref_high_type": cand["ref_high_type"],
+                    "oliver_type":   cand["oliver_type"],
+                    "sector":        sec,
+                })
 
         # ================================================================
         # STEP 3: TRACK EQUITY CURVE
