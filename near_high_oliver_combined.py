@@ -44,6 +44,17 @@ EXIT      : (checked in priority order, both stop and target modeled as
             3. Oliver Trailing EMA stop (EMA20 early, EMA10 after MIN_HOLD_DAYS)
             4. Extension exit (Close > EMA20 + 3*ATR)
 
+COSTS     : Slippage (0.05% default) applied to market-style fills only --
+              next-day-open entries and Oliver_EMA_Stop/Extension_Exit/
+              End_Of_Data closes. Stop_Loss/Target_Hit limit fills get 0%
+              slippage by design.
+            Statutory + broker charges modeled per NSE delivery trade:
+              brokerage (0 by default -- most discount brokers), STT (0.1%
+              both legs), exchange transaction charges, SEBI fees, stamp
+              duty (buy side), GST on brokerage+exchange+SEBI, and a flat
+              DP charge on the sell side. See buy_cost()/sell_cost() and
+              the config block for exact rates -- adjust to match your broker.
+
 SIGNAL TYPES: 'NearHigh_Wedge_1Y', 'NearHigh_Wedge_5Y', 'NearHigh_Wedge_ATH',
               'NearHigh_Crossback_1Y', 'NearHigh_Crossback_5Y', 'NearHigh_Crossback_ATH'
 
@@ -101,6 +112,49 @@ PER_POSITION_CAPITAL = INITIAL_CAPITAL / MAX_POSITIONS  # ~33,333 per slot
 USE_SECTOR_FILTER    = True   # enable sector trend + diversity filters
 MAX_SAME_SECTOR      = 1      # max positions from the same sector at once
 SECTOR_TREND_EMA     = 50     # EMA period for sector index trend detection
+
+# =============================================================================
+# SLIPPAGE & TRANSACTION COSTS (NSE equity DELIVERY trades, India)
+# =============================================================================
+# Slippage: applied to fills that behave like market orders (next-day-open
+# entry, and exits that aren't resting limit orders). Stop-loss/target exits
+# are modeled as limit orders (see backtest_portfolio) and fill at the exact
+# limit price, so slippage does NOT apply to those -- that's the point of a
+# limit order.
+SLIPPAGE_PCT         = 0.05   # % adverse slippage on market-style fills (buy higher / sell lower)
+
+# Statutory / broker charges. Defaults assume a typical Indian discount
+# broker's zero-brokerage delivery plan (Zerodha/Angel One/Upstox all offer
+# this) -- adjust BROKERAGE_PCT / BROKERAGE_FLAT if your broker charges more.
+BROKERAGE_PCT        = 0.0    # brokerage % of turnover per order (0 = free delivery)
+BROKERAGE_FLAT       = 0.0    # flat Rs per order (use if your broker charges a flat fee instead)
+STT_PCT              = 0.1    # Securities Transaction Tax %, charged on BOTH buy and sell (delivery)
+EXCHANGE_TXN_PCT     = 0.00297  # NSE transaction charges %
+SEBI_PCT             = 0.0001   # SEBI turnover fees % (~Rs 10 per crore)
+STAMP_DUTY_PCT       = 0.015    # stamp duty %, BUY side only
+GST_PCT              = 18.0     # GST % on (brokerage + exchange charges + SEBI fees)
+DP_CHARGE_PER_SELL   = 20.0     # flat Rs per scrip on SELL side (DP + broker charges, delivery)
+
+
+def buy_cost(turnover: float) -> float:
+    """Total charges for the buy leg of a delivery trade (Rs)."""
+    brokerage = BROKERAGE_FLAT + turnover * BROKERAGE_PCT / 100
+    stt       = turnover * STT_PCT / 100
+    exch      = turnover * EXCHANGE_TXN_PCT / 100
+    sebi      = turnover * SEBI_PCT / 100
+    stamp     = turnover * STAMP_DUTY_PCT / 100
+    gst       = (brokerage + exch + sebi) * GST_PCT / 100
+    return brokerage + stt + exch + sebi + stamp + gst
+
+
+def sell_cost(turnover: float) -> float:
+    """Total charges for the sell leg of a delivery trade (Rs)."""
+    brokerage = BROKERAGE_FLAT + turnover * BROKERAGE_PCT / 100
+    stt       = turnover * STT_PCT / 100
+    exch      = turnover * EXCHANGE_TXN_PCT / 100
+    sebi      = turnover * SEBI_PCT / 100
+    gst       = (brokerage + exch + sebi) * GST_PCT / 100
+    return brokerage + stt + exch + sebi + gst + DP_CHARGE_PER_SELL
 
 # =============================================================================
 # ETF / FUND EXCLUSION PATTERNS
@@ -821,9 +875,11 @@ def backtest_portfolio(
                 if USE_SECTOR_FILTER and sectors_held_fill.get(sec, 0) >= MAX_SAME_SECTOR:
                     continue  # sector slot already taken by another fill today
 
-                ep = float(row["open"])
-                if ep <= 0:
+                raw_open = float(row["open"])
+                if raw_open <= 0:
                     continue
+                # Market-style fill at next day's open: adverse slippage applies
+                ep = raw_open * (1 + SLIPPAGE_PCT / 100)
 
                 sp = round(ep * (1 - STOP_LOSS_PCT), 2)
                 tp = round(cand["ref_high"] * (1 + TARGET_ABOVE_HIGH_PCT), 2)
@@ -837,10 +893,12 @@ def backtest_portfolio(
                     continue
 
                 actual_cost = shares * ep
-                if actual_cost > cash:
+                entry_charges = buy_cost(actual_cost)
+                total_outlay  = actual_cost + entry_charges
+                if total_outlay > cash:
                     continue
 
-                cash -= actual_cost
+                cash -= total_outlay
                 sectors_held_fill[sec] += 1
                 filled += 1
 
@@ -855,6 +913,7 @@ def backtest_portfolio(
                     "bars_held":        0,
                     "shares":           shares,
                     "allocated_capital": actual_cost,
+                    "entry_cost":       entry_charges,
                     "sector":           sec,
                 }
 
@@ -905,8 +964,19 @@ def backtest_portfolio(
                     exit_reason = "Extension_Exit"
 
             if exit_reason:
-                pnl_rs  = (exit_price - pos["entry_price"]) * pos["shares"]
-                pnl_pct = (exit_price - pos["entry_price"]) / pos["entry_price"] * 100
+                # Stop_Loss / Target_Hit are resting LIMIT orders -> fill at
+                # the exact limit price, no slippage. Oliver_EMA_Stop /
+                # Extension_Exit close out at market (close price) -> slippage applies.
+                if exit_reason not in ("Stop_Loss", "Target_Hit"):
+                    exit_price = exit_price * (1 - SLIPPAGE_PCT / 100)
+
+                invested       = pos["allocated_capital"] + pos["entry_cost"]
+                sell_turnover  = exit_price * pos["shares"]
+                exit_charges   = sell_cost(sell_turnover)
+                net_proceeds   = sell_turnover - exit_charges
+                pnl_rs         = net_proceeds - invested
+                pnl_pct        = pnl_rs / invested * 100
+                total_costs    = pos["entry_cost"] + exit_charges
 
                 trades.append({
                     "Symbol":         symbol,
@@ -928,10 +998,12 @@ def backtest_portfolio(
                     "Exit_Reason":    exit_reason,
                     "Entry_Month":    pos["entry_date"].strftime("%Y-%m"),
                     "Allocated_Capital": round(pos["allocated_capital"], 2),
+                    "Costs_Rs":       round(total_costs, 2),
                 })
 
-                # Return capital (allocated + pnl)
-                cash += pos["allocated_capital"] + pnl_rs
+                # Credit net sale proceeds (invested amount was already
+                # deducted from cash at entry time, including entry costs)
+                cash += net_proceeds
                 symbols_to_close.append(symbol)
 
         for s in symbols_to_close:
@@ -1072,12 +1144,17 @@ def backtest_portfolio(
         for symbol, pos in list(open_positions.items()):
             row = stock_row_lookup.get(symbol, {}).get(last_date)
             if row is not None:
-                ep_exit = float(row["close"])
+                ep_exit = float(row["close"]) * (1 - SLIPPAGE_PCT / 100)  # market-style forced close
             else:
                 ep_exit = pos["entry_price"]  # fallback
 
-            pnl_rs  = (ep_exit - pos["entry_price"]) * pos["shares"]
-            pnl_pct = (ep_exit - pos["entry_price"]) / pos["entry_price"] * 100
+            invested      = pos["allocated_capital"] + pos["entry_cost"]
+            sell_turnover = ep_exit * pos["shares"]
+            exit_charges  = sell_cost(sell_turnover)
+            net_proceeds  = sell_turnover - exit_charges
+            pnl_rs        = net_proceeds - invested
+            pnl_pct       = pnl_rs / invested * 100
+            total_costs   = pos["entry_cost"] + exit_charges
 
             trades.append({
                 "Symbol":         symbol,
@@ -1099,6 +1176,7 @@ def backtest_portfolio(
                 "Exit_Reason":    "End_Of_Data",
                 "Entry_Month":    pos["entry_date"].strftime("%Y-%m"),
                 "Allocated_Capital": round(pos["allocated_capital"], 2),
+                "Costs_Rs":       round(total_costs, 2),
             })
 
     return trades, equity_curve
@@ -1179,6 +1257,20 @@ def performance_report(
         print(f"  Best Trade         : {best['Symbol']}  Rs {best['PnL_Rs']:,.0f}  ({best['PnL_Pct']:.1f}%)")
     if worst is not None:
         print(f"  Worst Trade        : {worst['Symbol']}  Rs {worst['PnL_Rs']:,.0f}  ({worst['PnL_Pct']:.1f}%)")
+
+    if "Costs_Rs" in trades_df.columns:
+        total_costs   = trades_df["Costs_Rs"].sum()
+        total_turnover = (trades_df["Entry_Price"] * trades_df["Shares"]).sum() + \
+                         (trades_df["Exit_Price"]  * trades_df["Shares"]).sum()
+        cost_pct_turnover = total_costs / total_turnover * 100 if total_turnover > 0 else 0
+        pnl_before_costs  = net_pnl + total_costs
+        print(f"\n  SLIPPAGE & COST IMPACT:")
+        print(f"  Slippage Assumption: {SLIPPAGE_PCT:.2f}%  (market-style fills only; limit fills get 0%)")
+        print(f"  Total Costs Paid   : Rs {total_costs:>14,.0f}  (brokerage+STT+exchange+SEBI+stamp+GST+DP)")
+        print(f"  Costs % of Turnover: {cost_pct_turnover:>11.3f}%")
+        print(f"  Avg Cost / Trade   : Rs {total_costs / total:>14,.0f}")
+        print(f"  P&L Before Costs   : Rs {pnl_before_costs:>14,.0f}")
+        print(f"  P&L After Costs    : Rs {net_pnl:>14,.0f}  (costs ate {total_costs / abs(pnl_before_costs) * 100 if pnl_before_costs != 0 else 0:.1f}% of gross P&L)")
 
     print(f"\n  PORTFOLIO-SPECIFIC STATS:")
     print(f"  Max Concurrent Pos : {max_concurrent:>12d}")
@@ -1294,6 +1386,9 @@ def run_backtest(
     print(f"  Capital: Rs {INITIAL_CAPITAL:,.0f}  |  Max Positions: {MAX_POSITIONS}")
     print(f"  Per-Position (start): Rs {PER_POSITION_CAPITAL:,.0f}  (compounds with equity)")
     print(f"  Rank Method: {RANK_METHOD.upper()}  |  ROC Period: {ROC_PERIOD} days")
+    print(f"  Entry: next-day open (T+1 fill)  |  Slippage: {SLIPPAGE_PCT:.2f}% on market-style fills")
+    print(f"  Costs: STT {STT_PCT:.2f}% + exch {EXCHANGE_TXN_PCT:.4f}% + SEBI {SEBI_PCT:.4f}% "
+          f"+ stamp {STAMP_DUTY_PCT:.3f}% (buy) + GST {GST_PCT:.0f}% + DP Rs {DP_CHARGE_PER_SELL:.0f} (sell)")
     print("=" * 70)
 
     # Decide universe
