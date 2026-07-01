@@ -810,7 +810,7 @@ def backtest_portfolio(
         all_dates.update(bt_df.index)
 
     if not all_dates:
-        return [], []
+        return [], [], {}
 
     all_dates = sorted(all_dates)
 
@@ -825,6 +825,18 @@ def backtest_portfolio(
     # Signals detected after today's close are queued here and filled at
     # NEXT trading day's open (no same-day lookahead entry).
     pending_entries = []
+
+    # Diagnostics: trace where candidates drop out of the entry funnel
+    funnel = {
+        "signals_raw": 0,          # rows with Signal True on a scanned day (pre-filter)
+        "lost_sector_trend": 0,    # skipped: sector index not trending
+        "lost_sector_diversity_scan": 0,  # skipped at scan time: sector slot taken
+        "queued": 0,               # accepted into pending_entries
+        "lost_no_data_next_day": 0,       # stock didn't trade on the fill day
+        "lost_sector_diversity_fill": 0,  # skipped at fill time: sector slot taken
+        "lost_capital": 0,         # not enough cash / <1 share at fill time
+        "filled": 0,               # successfully entered
+    }
 
     # Pre-build per-stock row lookups for fast access
     # For each stock, build a dict: {timestamp -> row_as_dict}
@@ -869,14 +881,17 @@ def backtest_portfolio(
 
                 row = stock_row_lookup.get(symbol, {}).get(dt)
                 if row is None:
+                    funnel["lost_no_data_next_day"] += 1
                     continue  # stock didn't trade today; order can't fill, signal lost
 
                 sec = cand["sector"]
                 if USE_SECTOR_FILTER and sectors_held_fill.get(sec, 0) >= MAX_SAME_SECTOR:
+                    funnel["lost_sector_diversity_fill"] += 1
                     continue  # sector slot already taken by another fill today
 
                 raw_open = float(row["open"])
                 if raw_open <= 0:
+                    funnel["lost_capital"] += 1
                     continue
                 # Market-style fill at next day's open: adverse slippage applies
                 ep = raw_open * (1 + SLIPPAGE_PCT / 100)
@@ -886,21 +901,25 @@ def backtest_portfolio(
 
                 alloc = min(position_size, cash)
                 if alloc < 1.0:
+                    funnel["lost_capital"] += 1
                     continue
 
                 shares = int(alloc / ep)
                 if shares < 1:
+                    funnel["lost_capital"] += 1
                     continue
 
                 actual_cost = shares * ep
                 entry_charges = buy_cost(actual_cost)
                 total_outlay  = actual_cost + entry_charges
                 if total_outlay > cash:
+                    funnel["lost_capital"] += 1
                     continue
 
                 cash -= total_outlay
                 sectors_held_fill[sec] += 1
                 filled += 1
+                funnel["filled"] += 1
 
                 open_positions[symbol] = {
                     "entry_price":      ep,
@@ -1043,6 +1062,7 @@ def backtest_portfolio(
                     continue
                 if not row["Signal"]:
                     continue
+                funnel["signals_raw"] += 1
 
                 rh, rh_type = get_ref_high(row)
                 if pd.isna(rh) or rh <= 0:
@@ -1089,15 +1109,18 @@ def backtest_portfolio(
                     # 1. Trend check: sector index must be above its EMA
                     #    trending_sectors was precomputed once for today (not per candidate)
                     if sec in sector_trends and sec not in trending_sectors:
+                        funnel["lost_sector_trend"] += 1
                         continue
 
                     # 2. Diversity check: cap same-sector positions (including
                     #    other candidates already queued from this same scan)
                     if sectors_held.get(sec, 0) >= MAX_SAME_SECTOR:
+                        funnel["lost_sector_diversity_scan"] += 1
                         continue
 
                 sectors_held[sec] += 1
                 slots_queued += 1
+                funnel["queued"] += 1
 
                 pending_entries.append({
                     "symbol":        symbol,
@@ -1179,7 +1202,7 @@ def backtest_portfolio(
                 "Costs_Rs":       round(total_costs, 2),
             })
 
-    return trades, equity_curve
+    return trades, equity_curve, funnel
 
 # =============================================================================
 # PERFORMANCE REPORT
@@ -1529,11 +1552,22 @@ def run_backtest(
     print(f"\n--- PASS 2: Portfolio simulation ({len(stock_data):,} stocks) | Rank: {RANK_METHOD.upper()} | Sector filter: {sector_status} ---\n")
 
     t1 = time.time()
-    all_trades, equity_curve = backtest_portfolio(stock_data, nifty_rank, sector_map, sector_trends)
+    all_trades, equity_curve, funnel = backtest_portfolio(stock_data, nifty_rank, sector_map, sector_trends)
     sim_elapsed = (time.time() - t1) / 60
 
     print(f"  Pass 2 done. {len(all_trades):,} trades in {sim_elapsed:.1f} min")
     print(f"  Equity curve: {len(equity_curve):,} data points\n")
+
+    if funnel:
+        print("  SIGNAL FUNNEL (why candidates did/didn't become trades):")
+        print(f"    Raw signals found (Signal=True, not already held) : {funnel['signals_raw']:>7,}")
+        print(f"    Lost to sector-trend filter (scan time)           : {funnel['lost_sector_trend']:>7,}")
+        print(f"    Lost to sector-diversity cap (scan time)          : {funnel['lost_sector_diversity_scan']:>7,}")
+        print(f"    Queued for next-day open                          : {funnel['queued']:>7,}")
+        print(f"    Lost: stock didn't trade on the fill day          : {funnel['lost_no_data_next_day']:>7,}")
+        print(f"    Lost: sector slot taken by another fill that day  : {funnel['lost_sector_diversity_fill']:>7,}")
+        print(f"    Lost: insufficient capital / <1 share at fill     : {funnel['lost_capital']:>7,}")
+        print(f"    Filled (became a trade)                           : {funnel['filled']:>7,}\n")
 
     if not all_trades:
         print("  No trades found. Exiting.")
