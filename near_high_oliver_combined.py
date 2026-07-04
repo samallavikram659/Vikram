@@ -848,7 +848,18 @@ def backtest_portfolio(
         stock_row_lookup[symbol] = row_dict
 
     # ---- Day-by-day simulation ----
-    for dt in all_dates:
+    total_days = len(all_dates)
+    t_sim_start = time.time()
+    print(f"  Simulating {total_days:,} trading days...")
+
+    for day_i, dt in enumerate(all_dates, 1):
+        if day_i % 250 == 0 or day_i == total_days:
+            elapsed = time.time() - t_sim_start
+            rate    = day_i / elapsed if elapsed > 0 else 1
+            eta_min = (total_days - day_i) / rate / 60
+            print(f"  [{day_i:>5}/{total_days}] days simulated  |  "
+                  f"{len(trades):,} trades so far  |  ETA: {eta_min:.1f} min", flush=True)
+
         # ================================================================
         # STEP 0: FILL PENDING ENTRIES (signals detected at yesterday's
         # close, executed at today's open — models placing the order after

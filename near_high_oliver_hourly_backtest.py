@@ -834,7 +834,18 @@ def backtest_portfolio(
         stock_row_lookup[symbol] = row_dict
 
     # ---- Bar-by-bar simulation ----
-    for dt in all_bars:
+    total_bars = len(all_bars)
+    t_sim_start = time.time()
+    print(f"  Simulating {total_bars:,} hourly bars...")
+
+    for bar_i, dt in enumerate(all_bars, 1):
+        if bar_i % 2000 == 0 or bar_i == total_bars:
+            elapsed = time.time() - t_sim_start
+            rate    = bar_i / elapsed if elapsed > 0 else 1
+            eta_min = (total_bars - bar_i) / rate / 60
+            print(f"  [{bar_i:>7}/{total_bars}] bars simulated  |  "
+                  f"{len(trades):,} trades so far  |  ETA: {eta_min:.1f} min", flush=True)
+
         # ================================================================
         # STEP 0: FILL PENDING ENTRIES (signal from the prior signal-bar,
         # filled at THIS bar's open -- "buy at 10:15 AM candle")
